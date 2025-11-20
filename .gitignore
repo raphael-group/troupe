@@ -1,0 +1,15 @@
+*.png
+*.pkl
+TODOs.txt
+*.pyc
+*cache*
+*.egg-info
+*.pth
+*temp*
+*tmp*
+*.log
+*.err
+*.nwk
+*loss.txt
+*.txt
+*.pdf
