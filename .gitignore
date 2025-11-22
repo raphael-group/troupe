@@ -1,5 +1,4 @@
 *.png
-*.pkl
 TODOs.txt
 *.pyc
 *cache*
@@ -13,3 +12,5 @@ TODOs.txt
 *loss.txt
 *.txt
 *.pdf
+.venv/*
+example/results/*

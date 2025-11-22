@@ -1,5 +1,5 @@
 """
-This is the main script for inferring model
+This is the main script for inferring the model
 
 """
 
@@ -7,12 +7,7 @@ import torch
 from ete3 import TreeNode
 
 from utils import get_terminal_labels, get_observed_potencies
-
-########################################
-# TODO: Change this back!!!
-# from OLD_optimizer import compute_mle
 from optimizer import compute_mle
-########################################
 
 import copy
 import pickle
@@ -53,8 +48,6 @@ def main():
         default=0.0,
         help="Used to constrain both NMP transitions to have equal rates."
     )
-    # NOTE: Make clear that this is the maximum number of hidden states (if there aren't this many
-    # potencies, we will use less)
     parser.add_argument(
         "-n", "--num_hidden_states",
         type=int,
@@ -118,7 +111,6 @@ def main():
     with open(args.input_trees_path, "rb") as fp:
         trees = pickle.load(fp)
         is_int_state = isinstance(list(trees[0].get_leaves())[0].state, int)
-        print("is_int_state:", is_int_state)
     states = set()
     for tree in trees:
         for leaf in tree.get_leaves():
@@ -127,9 +119,6 @@ def main():
 
     observed_potencies = get_observed_potencies(args.observed_potencies_path, is_int_state)
     terminal_labels = get_terminal_labels(args.terminal_label_path, is_int_state)
-
-    print("observed potencies:")
-    print(observed_potencies)
     
     print(f"=> Using provided potency sets at {args.potency_path}")
     with open(args.potency_path, "rb") as fp:
@@ -138,7 +127,6 @@ def main():
     print("Potency sets:")
     for potency in potency_sets:
         print(potency)
-
     print("Number of hidden states:  ", num_hidden_states)
     print("Number of observed states:", num_obs_states)
 
@@ -150,7 +138,6 @@ def main():
         state_list = list(states)
         state_list.sort()
         # Index observed states
-        print("Observed state labels:", state_list)
         state2idx = {state: i for i, state in enumerate(state_list)}
         # Index hidden states as well
         observed_idxs = set(state2idx.values())
@@ -205,8 +192,6 @@ def main():
     print("idx -> state")
     for idx, state in model_info["idx2state"].items():
         print(idx, "\t", state)
-    
-    # TODO: Uncomment this
     print("idx -> potency")
     for idx, potency in model_info["idx2potency"].items():
         print(idx, "\t", potency)

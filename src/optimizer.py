@@ -213,7 +213,7 @@ def _run_lbfgs(trees,
         growth_params_init = torch.log(torch.exp(torch.ones(n_states, device=device) * lam) - 1)
     else:
         growth_params_init = model_info["growth_params_init"].to(device)
-    print("=> Initializing growth params as:", F.softplus(growth_params_init))
+    # print("=> Initializing growth params as:", F.softplus(growth_params_init))
 
     if "Q_params_init" not in model_info:
         # Initialize parameters uniformly among all descendant states so that process is critical
@@ -235,7 +235,7 @@ def _run_lbfgs(trees,
     Q_init = F.softplus(Q_params_init)
     Q_init = Q_init.fill_diagonal_(0)
     Q_init -= torch.diag(Q_init.sum(dim=1))
-    print("=> Initializing transition rates as:\n", Q_init)
+    # print("=> Initializing transition rates as:\n", Q_init)
 
     llh = PureBirthLikelihoodModel(trees,
                                     n_states,
@@ -251,8 +251,8 @@ def _run_lbfgs(trees,
 
     tree_idxs = [i for i in range(len(trees))]
     changeable_params = [p for p in llh.parameters(recurse=True) if p.requires_grad]
-    print("Q_params")
-    print(llh.get_Q_params())
+    # print("Q_params")
+    # print(llh.get_Q_params())
 
     # NOTE: Add for debugging
     # torch.autograd.set_detect_anomaly(True)
@@ -275,15 +275,6 @@ def _run_lbfgs(trees,
             lr=0.1,
             line_search_fn="strong_wolfe"
         )
-        # print("Using default LBFGS")
-        # optimizer = optim.LBFGS(
-        #     changeable_params,
-        #     lr=1.0,
-        #     max_iter=25,
-        #     history_size=50,
-        #     tolerance_grad=1e-12,
-        #     tolerance_change=1e-12
-        # )
 
     def closure():
         optimizer.zero_grad()
@@ -346,19 +337,18 @@ def _run_lbfgs(trees,
                     pickle.dump(model_dict, fp)
                     print(f"Saving model_dict to {output_dir}/model_dict.pkl")
 
-        if do_logging and i % log_iter == 0:
-            print(f"{i} loss: {loss.item()}")
-            print("Rate matrix:")
-            print(rate_matrix)
-            print("Root distribution", pi)
-            if hasattr(llh, "get_growth_rates"):
-                print("Growth rates:")
-                print(llh.get_growth_rates())
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            print(f"\t{(time.time() - start) / min(i+1, log_iter):.4f} s/iter")
-            start = time.time()
+        # if do_logging and i % log_iter == 0:
+        #     print(f"{i} loss: {loss.item()}")
+        #     print("Rate matrix:")
+        #     print(rate_matrix)
+        #     print("Root distribution", pi)
+        #     if hasattr(llh, "get_growth_rates"):
+        #         print("Growth rates:")
+        #         print(llh.get_growth_rates())
+        #     if torch.cuda.is_available():
+        #         torch.cuda.synchronize()
+        #     print(f"\t{(time.time() - start) / min(i+1, log_iter):.4f} s/iter")
+        #     start = time.time()
 
         
         if len(losses) > 10:

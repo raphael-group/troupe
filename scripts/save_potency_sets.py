@@ -82,7 +82,6 @@ def main():
     max_potency = tuple(sorted(list(terminal_labels)))
 
     if args.unconstrained_unobserved:
-        print("Unconstrained unobserved states")
 
         if args.unconstrained_observed:
             num_hidden_progenitors = len(terminal_labels) + args.max_num_potencies
@@ -102,8 +101,6 @@ def main():
         with open(f"{args.trial_output_dir}/potency.pkl", "wb") as fp:
             sorted_potency_list = sorted(potency_list, key=len, reverse=True)
             pickle.dump(sorted_potency_list, fp)
-
-        print("Potency list:", sorted_potency_list)
 
     else:
         induced_potencies = set()
@@ -128,9 +125,6 @@ def main():
                     list_clade.sort()
                     induced_potencies.add(tuple(list_clade))
 
-        print(f"trees have {len(induced_potencies)} clades")
-        print(induced_potencies)
-
         potencies_to_add = set()
         for potency in induced_potencies:
             assert len(potency) > 0
@@ -153,17 +147,12 @@ def main():
         potency_list.sort(key=len)
         largest_potency = potency_list[-1]
 
-        print(f"found {len(potencies)} potencies")
-        print(potencies)
-
         # Remove known potencies (i.e., totipotent and each observed potency)
         removed_potencies = []
         if len(largest_potency) == len(terminal_labels):
             potencies.remove(largest_potency)
             removed_potencies.append(largest_potency)
         to_remove = sorted(list(observed_potencies.values()), key=len)
-
-        print("to_remove:", to_remove)
 
         if largest_potency in to_remove:
             to_remove = to_remove[:-1]
@@ -174,20 +163,17 @@ def main():
             potencies.remove(potency)
             removed_potencies.append(potency)
 
-        print(f"Removed {len(removed_potencies)} potencies:", removed_potencies)
-
         num_unobserved_potencies = args.max_num_potencies - (len(removed_potencies) - len(terminal_labels))
         k = min(num_unobserved_potencies, len(potencies))
         assert k >= 0
         size_k_subsets = list(combinations(potencies, k))
         for i, subset in enumerate(size_k_subsets):
-            print("subset:", subset)
             subset_list = list(subset)
 
             # Add known potencies back in
             for potency in removed_potencies:
                 subset_list.append(potency)
-            print(f"{i} \t {subset_list}")
+            # print(f"{i} \t {subset_list}")
 
             if len(size_k_subsets) == 1 and not args.exact:
                 output_dir = args.trial_output_dir

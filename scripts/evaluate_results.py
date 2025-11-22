@@ -176,326 +176,116 @@ def isomorphic_error(mat1, mat2, obs_states=None):
 def cli():
     pass
 
-# @cli.command()
-# @click.option('-r', '--rate_matrix_idx', default=None, help='index of the rate matrix (0-5)')
-# @click.option('-t', '--trial', default= None, help='trial to plot')
-# @click.option('-h', '--num_hidden_states', default=None, help='number of hidden states.')
-# @click.option('-s', '--stopping_time', default=None, help='cutoff time for the process.')
-# def evaluate_consistency_experiment(rate_matrix_idx, trial, num_hidden_states, stopping_time):
-#     """
-#     Usage example:
-#         # python scripts/evaluate_results.py evaluate-consistency-experiment -r 3 -s 3.0 -t 0
-#         # python scripts/evaluate_results.py evaluate-consistency-experiment -r 4 -s 1.75 -t 0
-#         python scripts/evaluate_results.py evaluate-consistency-experiment -r 5 -s 1.0 -t 0
-#         python scripts/evaluate_results.py evaluate-consistency-experiment -r 6 -s 3.0 -t 0
-#         python scripts/evaluate_results.py evaluate-consistency-experiment -r 4 -s 3.0 -t 0
-#         ...
-#         python scripts/evaluate_results.py evaluate-consistency-experiment -r 10 -s 2.0 -t 0
-#     """
 
-#     # NOTE: This is specific to the rate matrix that is used
-#     num_terminal_states = 4
-#     stopping_text = f"time_{stopping_time}"
+@cli.command()
+@click.option('-r', '--model_results_dir', type=str)
+@click.option('-p', '--observed_potencies_dir', type=str)
+def draw_graph(model_results_dir, observed_potencies_dir):
+    """
+    Example usage:
+        python scripts/evaluate_results.py draw-graph \
+        -r /n/fs/ragr-research/users/wh8114/projects/troupe/example/results/reg=1/select_potencies\
+        -p /n/fs/ragr-research/users/wh8114/projects/troupe/example/results/reg=1
+    """
 
-#     experiment_name = "tests/consistency_experiment"    # "branching_process_experiment"    # "potency_experiment"
-#     simulation_name = "branching_process_experiment"
-#     prefix = ""                                         # "scaled_loss_infer_growth_rates"           # "infer_growth_rates"
+    terminal_path = f"{observed_potencies_dir}/terminal_labels.txt"
+    observed_potencies_path = f"{observed_potencies_dir}/observed_potencies.txt"
 
-#     data_dir=f"{simulated_data_dir}/{simulation_name}"
-#     ground_truth_Q_path = f"{data_dir}/{rate_matrix_idx}/Q.pkl"
-#     with open(ground_truth_Q_path, "rb") as fp:
-#         ground_truth_np = pickle.load(fp)
-#         ground_truth_rate_matrix = torch.from_numpy(ground_truth_np)
-#     model_info_path = f"{script_dir}/{simulation_name}/model_params/rate_matrix_{rate_matrix_idx}.json"
-#     with open(model_info_path, "r") as fp:
-#         info_dict = json.load(fp)
-#     gt_np = np.array(info_dict["rate_matrix"])
-#     assert not any((gt_np - ground_truth_np).reshape(-1))
-#     ground_truth_growth_rates = torch.tensor(info_dict["growth_rates"])
-
-#     num_states_gt = len(ground_truth_rate_matrix)
-#     num_progenitors_gt = num_states_gt - num_terminal_states
-#     if "init_distribution" in info_dict:
-#         ground_truth_initial_distr = torch.tensor(info_dict["init_distribution"])
-#         starting_state = torch.argmax(ground_truth_initial_distr)
-#     else:
-#         starting_state = num_terminal_states
-#     ground_truth_pi_params = torch.ones(len(ground_truth_rate_matrix)) * -1e20
-#     ground_truth_pi_params[starting_state] = 1e20
+    terminal_labels = get_terminal_labels(terminal_path)
+    observed_potencies = get_observed_potencies(observed_potencies_path)
+    figure_dir = f"{model_results_dir}/figures"
+    os.makedirs(figure_dir, exist_ok=True)
+    draw_graph_normal(model_results_dir, figure_dir, terminal_labels,
+                      observed_potencies=observed_potencies, thresh=1e-4)
 
 
-#     methods = [
-#         "constrained_reg=0.0",
-#         "unconstrained_reg=0.0",
-#         #"overparameterized_reg=..."
-#         # "unconstrained_reg=0.01",
-#         # "unconstrained_reg=0.05",
-#         # "unconstrained_reg=0.01",
-#         # "unconstrained_reg=0.005",
-#         # "unconstrained_reg=0.001",
-#         # "unconstrained_reg=0.001"
-#         # "unconstrained_l1_reg=0.05",
-#         # "unconstrained_l1_reg=0.01",
-#         # "unconstrained_l1_reg=0.1"
-#     ]
-#     method2reg_strength = {
-#         "constrained": 0,
-#         "unconstrained_reg=0.0": 0,
-#         "unconstrained_reg=0.1": 0.1,
-#         "unconstrained_reg=0.05": 0.05,
-#         "unconstrained_reg=0.01": 0.01,
-#         "unconstrained_reg=0.005": 0.005,
-#         "unconstrained_reg=0.001": 0.001,
-#         "unconstrained_reg=0.01": 0.01,
-#         "unconstrained_l1_reg=0.05": 0.05,
-#         "unconstrained_l1_reg=0.01": 0.01,
-#         "unconstrained_l1_reg=0.1": 0.1
-#     }
-#     method2name = {
-#         "constrained_reg=0.0": "Potency Constrained",
-#         "unconstrained_reg=0.0": "Unconstrained",
-#     }
-#     potency_constrained_methods = {"constrained"}
+@cli.command()
+@click.option('-r', '--reg_results_dir', type=str)
+@click.option('-t', '--trees_path', type=str)
+def plot_knees(reg_results_dir, trees_path):
+    """
+    Usage example:
+        python scripts/evaluate_results.py plot-knees \
+        -r /n/fs/ragr-research/users/wh8114/projects/troupe/example/results \
+        -t /n/fs/ragr-research/users/wh8114/projects/troupe/example/data/trees.pkl
+    """
 
-#     tree_counts = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    with open(trees_path, "rb") as fp:
+        trees = pickle.load(fp)
 
-#     method2lik = {method: [] for method in methods}
-#     method2q_err = {method: [] for method in methods}
-#     method2growth_err = {method: [] for method in methods}
-#     method2tree_count = {method: [] for method in methods}
-#     num_trees2num_observed = {}
+    regs = [0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1 , 3, 10]
+    used_regs = []
+    neg_llh = []
+    num_reachable_states = []
+    reg2num_states = {}
+    for reg in regs:
+        if reg == 0:
+            loss_path = f"{reg_results_dir}/reg={reg}/loss.txt"
+            model_dict_path = f"{reg_results_dir}/reg={reg}/model_dict.pkl"
+        else:
+            loss_path = f"{reg_results_dir}/reg={reg}/select_potencies/loss.txt"
+            model_dict_path = f"{reg_results_dir}/reg={reg}/select_potencies/model_dict.pkl"
+        if not os.path.isfile(loss_path):
+            print(f"Skipping: {loss_path}")
+            continue
+        with open(model_dict_path, "rb") as fp:
+            model_dict = pickle.load(fp)
+            inferred_rate_matrix = model_dict["rate_matrix"]
+            inferred_rate_matrix_np = inferred_rate_matrix.detach().numpy()
+            inferred_root_distribution = model_dict["root_distribution"]
+            starting_state = torch.argmax(inferred_root_distribution).item()
+            inferred_pi_params = torch.log(inferred_root_distribution * 1e20)
+            inferred_growth_rates = model_dict["growth_rates"]
+            idx2state = model_dict["idx2state"]
+            state2idx = {state: idx for idx, state in idx2state.items()}
+        prepped_trees = [_prep_log_tree(tree, len(inferred_rate_matrix), state2idx) for tree in trees]
+        inferred_log_lik = log_vec_likelihood(prepped_trees,
+                                            inferred_rate_matrix,
+                                            inferred_pi_params,
+                                            growth_rates=inferred_growth_rates,
+                                            state2idx=state2idx).item()
 
-#     for num_trees in tree_counts:
-#         print("Num trees:", num_trees)
-#         trees_path = f"{data_dir}/{rate_matrix_idx}/trees_{num_trees}/{stopping_text}/" + \
-#                         f"trial_{trial}/trees.pkl"
+        reachable_idxs = get_reachable_idxs(inferred_rate_matrix_np, starting_state, threshold=1e-6)
+        neg_llh.append(-inferred_log_lik)
+        num_reachable_states.append(len(reachable_idxs))
+        used_regs.append(reg)
+        reg2num_states[reg] = len(reachable_idxs)
 
-#         with open(trees_path, "rb") as fp:
-#             trees = pickle.load(fp)
-#         cell_types = set()
-#         for tree in trees:
-#             type_counter = Counter()
-#             for leaf in tree.get_leaves():
-#                 type_counter[leaf.state] += 1
-#                 cell_types.add(leaf.state)
+    # Set y-vals to be the minimum among all the same x-vals
+    y_ = neg_llh
+    x_ = num_reachable_states
+    state2liks = {x_val: [] for x_val in x_}
+    for x_val, y_val in zip(x_, y_):
+        state2liks[x_val].append(y_val)
+    y = []
+    x = list(set(x_))
+    x.sort()
+    for x_val in x:
+        y.append(min(state2liks[x_val]))
+    print("num states:  ", x)
+    print("likelihoods: ", y)
+    kneedle = KneeLocator(x, y, S=0.5, curve="convex", direction="decreasing")
 
-#         prepped_trees = [_prep_log_tree(tree, num_states_gt) for tree in trees]
-#         true_log_lik = log_vec_likelihood(prepped_trees,
-#                                             ground_truth_rate_matrix,
-#                                             ground_truth_pi_params,
-#                                             growth_rates=ground_truth_growth_rates).item()
-#         num_observed_states = len(cell_types)
-#         num_hidden_states = num_states_gt - num_observed_states
+    if kneedle.knee is not None:
+        knee_x = kneedle.knee
+        knee_y = kneedle.knee_y
+        print("Knee:", knee_x, knee_y)
+    else:
+        knee_x = "Error"
+        knee_y = "Error"
 
-#         num_trees2num_observed[num_trees] = num_observed_states
+    with open(f"{reg_results_dir}/num_states_knee.txt", "w") as fp:
+        fp.write(f"knee_x\t{knee_x}\n")                 # x-value of highest curvature
+        fp.write(f"knee_y\t{knee_y}\n")                 # y-value of highest curvature
 
-#         # Evaluate quality of inference
-#         for method in methods:
-#             num_states = num_observed_states + num_hidden_states
-
-#             trial_results_dir = f"{results_dir}/{experiment_name}/{method}/" + \
-#                                 f"{rate_matrix_idx}/" + \
-#                                 f"trees_{num_trees}/{stopping_text}/" + \
-#                                 f"trial_{trial}/num_potencies_{num_hidden_states}"
-
-#             # Find run with the lowest loss (will be starting state for unconstrained
-#             # and index of potency sets for constrained)
-#             # TODO: Potency should be replaced by 'run' or something here
-#             idx2potency_loss = {}
-#             directory_path = trial_results_dir
-#             if not os.path.isdir(directory_path):
-#                 print("Skipping:", directory_path)
-#                 continue
-#             potency_folder_idxs = list_folder_names(directory_path)
-#             if "figures" in potency_folder_idxs:
-#                 potency_folder_idxs.remove("figures")
-            
-#             for idx in potency_folder_idxs:
-#                 loss_path = f"{directory_path}/{idx}/loss.txt"
-#                 potency_path = f"{directory_path}/{idx}/potency.pkl"
-#                 if not os.path.isfile(loss_path):
-#                     state_dict_path = f"{directory_path}/{idx}/model_dict.pkl"  # TODO: Write the model_dict at each iteration
-#                     if not os.path.isfile(state_dict_path):
-#                         print("Skipping:", state_dict_path)
-#                         continue
-#                     inferred_rate_matrix, inferred_pi_params, inferred_growth_rates, state2idx = load_model_params(state_dict_path)
-#                     inferred_log_lik = log_vec_likelihood(prepped_trees,
-#                                                         inferred_rate_matrix,
-#                                                         inferred_pi_params,
-#                                                         state2idx=state2idx,
-#                                                         growth_rates=inferred_growth_rates).item()
-#                     temp_mat = torch.abs(inferred_rate_matrix.clone())
-#                     temp_mat.fill_diagonal_(0)
-#                     loss = -inferred_log_lik + method2reg_strength[method] * torch.sum(temp_mat)
-#                 else:
-#                     with open(loss_path, "r") as fp:
-#                         loss = float(fp.readline())
-#                 if not os.path.isfile(potency_path):    # NOTE: Unconstrained case
-#                     potency = None
-#                 else:
-#                     with open(potency_path, "rb") as fp:
-#                         potency = pickle.load(fp)
-#                         potency = sorted(potency, key=len, reverse=True)
-#                 idx2potency_loss[idx] = (potency, loss)
-#             sorted_potencies = sorted(idx2potency_loss.items(), key=lambda item: item[1][1])
-#             best_potency = sorted_potencies[0][1][0]
-#             best_idx = sorted_potencies[0][0]
-#             best_potency_sets, best_loss = idx2potency_loss[best_idx]
-#             best_potency_results_dir = f"{directory_path}/{best_idx}"
-#             model_dict_path = f"{best_potency_results_dir}/model_dict.pkl"
-#             state_dict_path = f"{best_potency_results_dir}/state_dict.pth"
-            
-#             if not os.path.isfile(model_dict_path):
-#                 print("Skipping:", rate_matrix_idx, num_hidden_states, trial)
-#                 continue
-
-#             inferred_rate_matrix, inferred_pi_params, inferred_growth_rates, state2idx = load_model_params(model_dict_path)
-#             # print("State2idx:", state2idx)
-#             # prepped_trees = [_prep_log_tree(tree, num_states, state2idx=state2idx) for tree in trees]
-#             inferred_log_lik = log_vec_likelihood(prepped_trees,
-#                                                     inferred_rate_matrix,
-#                                                     inferred_pi_params,
-#                                                     state2idx=state2idx,
-#                                                     growth_rates=inferred_growth_rates).item()
-#             inferred_rate_matrix = inferred_rate_matrix.detach().numpy()
-
-#             ground_truth_growth_rates_np = ground_truth_growth_rates.detach().numpy()
-#             method2lik[method].append(inferred_log_lik/true_log_lik)
-#             print(f"Inferred log lik: {inferred_log_lik} \t v.s.\t True log lik: {true_log_lik}")
-#             method2tree_count[method].append(num_trees)
-
-#             observed_types = list(cell_types)
-#             observed_types.sort()
-#             err, label_perm = isomorphic_error(inferred_rate_matrix, ground_truth_np, observed_types)
-#             method2q_err[method].append(err)
-#             method2growth_err[method].append(np.sum(np.abs(inferred_growth_rates.detach().numpy()[label_perm]-ground_truth_growth_rates_np)))
-
-#             trial_figure_dir = f"{trial_results_dir}/figures"
-#             os.makedirs(trial_figure_dir, exist_ok=True)
-
-#             thresh = 0.01
-#             inferred_output_path = f"{trial_figure_dir}/best_inferred_graph_idx={best_idx}.pdf"
-#             if state2idx is not None:
-#                 idx2state = {v: k for k, v in state2idx.items()}
-#                 node_labels = {idx: str(state) for idx, state in idx2state.items()}
-#                 node_colors = {str(state): color_list[idx] for idx, state in idx2state.items()}
-#                 # Assign labels to the unobserved idxs
-#                 used_labels = set(node_labels.values())
-#                 potential_labels = {str(i) for i in range(num_states)}
-#                 remaining_labels = list(potential_labels.difference(used_labels))
-#                 ptr = 0
-#                 for i in range(num_states):
-#                     if i in node_labels:
-#                         continue
-#                     node_labels[i] = remaining_labels[ptr]
-#                     node_colors[node_labels[i]] = "#D3D3D3"
-#                     ptr += 1
-#                 # print("node labels:", node_labels)
-#             else:
-#                 node_labels = {i: str(i) for i in range(num_states)}
-#                 node_colors = {str(i): color_list[i] for i in range(num_observed_states)}
-#                 for i in range(num_hidden_states):
-#                     node_colors[str(i+num_observed_states)] = "#D3D3D3"   # Grey
-            
-#             if method in potency_constrained_methods:
-#                 state2potency = get_idx2potency(inferred_rate_matrix)
-#             else:
-#                 state2potency = None
-
-#             starting_idx = torch.argmax(inferred_pi_params).detach().item()
-#             draw_weighted_graph(inferred_rate_matrix,
-#                                 inferred_output_path,
-#                                 thresh, node_labels,
-#                                 node_colors,
-#                                 totipotent_state=starting_idx,
-#                                 state2potency=state2potency)
-
-#     figure_outdir = f"{results_dir}/{experiment_name}/figures/{rate_matrix_idx}/time={stopping_time}/trial={trial}"
-#     os.makedirs(figure_outdir, exist_ok=True)
-
-#     num_observed = num_trees2num_observed.values()
-
-#     # Plot error vs num
-#     for method, errors in method2q_err.items():
-#         tree_counts = method2tree_count[method]
-#         num_observed_list = [num_trees2num_observed[t] for t in tree_counts]
-#         plt.plot(tree_counts, errors, label=method2name[method], zorder=0)
-#         scatter = plt.scatter(tree_counts, errors, c=num_observed_list, cmap="plasma", zorder=1, s=50)
-#     plt.colorbar(scatter, label="Num observed cell-types", ticks=np.arange(min(num_observed), max(num_observed)+1))
-#     plt.legend()
-#     plt.xlabel("Number of trees")
-#     plt.xscale("log", base=2)
-#     plt.ylabel("Absolute error")
-#     plt.savefig(f"{figure_outdir}/rate_matrix_error_vs_data_size.pdf", dpi=400)
-#     plt.clf()
-
-#     # Plot growth rate error vs num
-#     for method, errors in method2growth_err.items():
-#         tree_counts = method2tree_count[method]
-#         num_observed_list = [num_trees2num_observed[t] for t in tree_counts]
-#         plt.plot(tree_counts, errors, label=method2name[method], zorder=0)
-#         scatter = plt.scatter(tree_counts, errors, c=num_observed_list, cmap="plasma", zorder=1, s=50)
-#     plt.colorbar(scatter, label="Num observed cell-types", ticks=np.arange(min(num_observed), max(num_observed)+1))
-#     plt.legend()
-#     plt.xlabel("Number of trees")
-#     plt.xscale("log", base=2)
-#     plt.ylabel("Absolute error")
-#     plt.savefig(f"{figure_outdir}/growth_rate_error_vs_data_size.pdf", dpi=400)
-#     plt.clf()
-
-#     # Plot likelihood vs num
-#     for method, liks in method2lik.items():
-#         tree_counts = method2tree_count[method]
-#         num_observed_list = [num_trees2num_observed[t] for t in tree_counts]
-#         plt.plot(tree_counts, liks, label=method2name[method], zorder=0)
-#         scatter = plt.scatter(tree_counts, liks, c=num_observed_list, cmap="plasma", zorder=1, s=50)
-#     plt.colorbar(scatter, label="Num observed cell-types", ticks=np.arange(min(num_observed), max(num_observed)+1))
-#     plt.legend()
-#     plt.xlabel("Number of trees")
-#     plt.xscale("log", base=2)
-#     plt.ylabel("Log likelihood ratio (infer/true)")
-#     plt.savefig(f"{figure_outdir}/likelihood_ratio_vs_data_size.pdf", dpi=400)
-#     plt.clf()
-
-
-# @cli.command()
-# def explore_tree_stats():
-#     """
-#     Usage example:
-#         python scripts/evaluate_results.py explore-tree-stats
-#     """
-#     branch_scalings = [0.5, 1, 2, 4, 8, 16, 32]
-#     stem_extensions = [0.0, 0.001, 0.01, 0.1]
-#     var_name = "stem"
-
-#     for var in stem_extensions:
-#         print()
-#         print(var_name, "=", var)
-#         working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
-#         experiment_name = f"TLSC_stem_extension/{var_name}={var}"
-#         experiment_dir = f"{working_dir}/experiments/{experiment_name}"
-#         trees_path = f"{experiment_dir}/processed_data/trees.pkl"
-#         with open(trees_path, "rb") as fp:
-#             trees = pickle.load(fp)
-#             total_leaves = 0
-#             stem_lengths = []
-#             for tree in trees:
-#                 # print(tree.children[0].dist)
-#                 # print(tree.get_ascii())
-#                 # assert len(tree.children) == 1
-#                 stem_lengths.append(tree.dist)
-#                 actual_num_leaves = len(tree.get_leaves())
-#                 total_leaves += actual_num_leaves
-#             cell_type_counts = Counter()
-#             for tree in trees:
-#                 counter = Counter()
-#                 for leaf in tree.get_leaves():
-#                     counter[leaf.state] += 1
-#                     cell_type_counts[leaf.state] += 1
-#             num_observed_states = len(cell_type_counts)
-
-#         print("avg:", sum(stem_lengths) / len(stem_lengths))
-#         print(stem_lengths)
+    plt.plot(x, y, marker='o', linewidth=4, markersize=15)
+    plt.ylabel("Negative Log Likelihood")
+    if kneedle.knee is not None:
+        plt.plot([knee_x], [knee_y], marker='*', color ='red', markersize=30)
+    plt.xlabel("Number of states")
+    os.makedirs(f"{reg_results_dir}/figures", exist_ok=True)
+    plt.savefig(f"{reg_results_dir}/figures/loss_vs_num_states.pdf")
+    plt.clf()
 
 
 @cli.command()
@@ -751,33 +541,6 @@ def evaluate_subsampling_experiment():
         plt.clf()
 
 
-
-
-@cli.command()
-def draw_graph():
-    """
-    Example usage:
-        python scripts/evaluate_results.py draw-graph
-    """
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/experiments"
-
-    # NOTE: To plot TLS graphs
-    # input_dir = f"{working_dir}/TLS/results_vanilla_likelihood/reg=1/select_potencies"
-
-    tree_path=f"{working_dir}/TLSC_constrained_transitions/processed_data/trees.pkl"
-    # input_dir = f"{working_dir}/TLSC_constrained_transitions/results/reg=0/select_potencies"
-    input_dir = f"{working_dir}/TLS_constrained_transitions/results/reg=10000/select_potencies"
-
-    terminal_path = f"{input_dir}/../../../terminal_labels.txt"
-    observed_potencies_path = f"{input_dir}/../../../observed_potencies.txt"
-
-    terminal_labels = get_terminal_labels(terminal_path)
-    observed_potencies = get_observed_potencies(observed_potencies_path)
-    figure_dir = f"{input_dir}/figures"
-    os.makedirs(figure_dir, exist_ok=True)
-    draw_graph_normal(input_dir, figure_dir, terminal_labels, tree_path=tree_path,
-                      observed_potencies=observed_potencies, thresh=1e-4)
-
 @cli.command()
 def draw_sse_graph():
     """
@@ -866,9 +629,11 @@ def draw_graph_normal(input_dir,
         inferred_root_distribution = model_dict["root_distribution"]
         inferred_pi_params = torch.log(inferred_root_distribution * 1e20)
         inferred_growth_rates = model_dict["growth_rates"]
-        idx2state = model_dict["idx2state"]
+        idx2state_ = model_dict["idx2state"]
+        idx2state = {idx: str(state) for idx, state in idx2state_.items()}
         state2idx = {state: idx for idx, state in idx2state.items()}
         terminal_idxs = [state2idx[state] for state in terminal_labels]
+    
 
     if tree_path is not None:
         with open(tree_path, "rb") as fp:
@@ -1638,7 +1403,6 @@ def evaluate_experiment():
     subsampling_rate = 1.0
     
     regs = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30]
-    # regs = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 0.71, 0.73, 0.75, 0.77, 0.79, 0.8, 1, 3, 10, 30] # NOTE: Adding 0.8 gets you 9 states in TLS
     
     trees_path = f"{experiment_dir}/processed_data/trees.pkl"
     tree_length = 1.0

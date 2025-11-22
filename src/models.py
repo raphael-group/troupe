@@ -555,9 +555,9 @@ class PureBirthLikelihoodModel(CTMCLikelihoodModel):
                                               device=self.device,
                                               init_Q_params=Q_params)
         
-        # NOTE: For debugging purposes
-        print(idx2state)
-        print(self.rate_builder.potency_constraint_mask)
+        # # NOTE: For debugging purposes
+        # print(idx2state)
+        # print(self.rate_builder.potency_constraint_mask)
         
         if start_state is not None:
             if pi_params is not None:

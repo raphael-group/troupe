@@ -2,20 +2,7 @@
 
 # ....
 # Example usage:
-#   `bash scripts/sample_efficiency_experiment/cluster_run_relaxed_inference.sh`
-
-# Change these depending on the simulation
-# num_terminals=5
-# process_time=2.5
-# rate_matrix=12
-
-# num_terminals=4
-# process_time=1.75
-# rate_matrix=2
-
-# num_terminals=4
-# process_time=1.8
-# rate_matrix=13
+#   `bash scripts/sample_efficiency_experiment/cluster_run_troupe_inference.sh`
 
 num_terminals=5
 process_time=2.35
@@ -25,7 +12,7 @@ max_num_hidden_states=1000
 num_cores=1
 subsampling_rate=1.0
 working_dir=/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml
-experiment_name=sample_efficiency_experiment/rate_matrix_$rate_matrix/relaxed
+experiment_name=sample_efficiency_experiment/rate_matrix_$rate_matrix/troupe
 rate_matrix_path=$working_dir/scripts/branching_process_experiment/model_params/rate_matrix_$rate_matrix.json
 stopping_text=time_$process_time
 
@@ -35,8 +22,7 @@ trial_stop=4
 source /n/fs/ragr-research/users/wh8114/projects/.venv/bin/activate
 
 
-for num_trees in 8 16 32 64 128 256 512
-# for num_trees in 64
+for num_trees in 16 32 64 128 256
 do
     for trial in $(seq $trial_start $trial_stop)
     do
@@ -48,8 +34,7 @@ do
 
         mkdir -p $trial_outdir
 
-        # for regularization in 0 0.001 0.003 0.01 0.03 0.1 0.3 1 3 10
-        for regularization in 0.001 0.003 0.01 0.03 0.1 0.3 1 3 10
+        for regularization in 0 0.001 0.003 0.01 0.03 0.1 0.3 1 3 10
         do
             echo trial=$trial num_trees=$num_trees regularization=$regularization
 

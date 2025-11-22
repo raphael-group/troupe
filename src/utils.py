@@ -67,8 +67,6 @@ def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0):
     Given a numpy array that represents a rate matrix, determine the potency set for each node.
     """
     transition_matrix = expm(100 * tree_length * rate_matrix)
-
-    print(transition_matrix)
     
     n = len(transition_matrix)
     idx2list = {}

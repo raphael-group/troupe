@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Example usage:
-#   `bash scripts/TLS_experiment/cluster_run_inference.sh`
+#   `bash scripts/TLS_experiment/cluster_run_troupe_inference.sh`
 
 subsampling_rate=1.0
 
