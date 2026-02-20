@@ -75,7 +75,7 @@ color_list = [
     '#999999'
 ]
 
-base_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 script_dir = f"{base_dir}/scripts"
 
@@ -178,117 +178,6 @@ def cli():
 
 
 @cli.command()
-@click.option('-r', '--model_results_dir', type=str)
-@click.option('-p', '--observed_potencies_dir', type=str)
-def draw_graph(model_results_dir, observed_potencies_dir):
-    """
-    Example usage:
-        python scripts/evaluate_results.py draw-graph \
-        -r /n/fs/ragr-research/users/wh8114/projects/troupe/example/results/reg=1/select_potencies\
-        -p /n/fs/ragr-research/users/wh8114/projects/troupe/example/results/reg=1
-    """
-
-    terminal_path = f"{observed_potencies_dir}/terminal_labels.txt"
-    observed_potencies_path = f"{observed_potencies_dir}/observed_potencies.txt"
-
-    terminal_labels = get_terminal_labels(terminal_path)
-    observed_potencies = get_observed_potencies(observed_potencies_path)
-    figure_dir = f"{model_results_dir}/figures"
-    os.makedirs(figure_dir, exist_ok=True)
-    draw_graph_normal(model_results_dir, figure_dir, terminal_labels,
-                      observed_potencies=observed_potencies, thresh=1e-4)
-
-
-@cli.command()
-@click.option('-r', '--reg_results_dir', type=str)
-@click.option('-t', '--trees_path', type=str)
-def plot_knees(reg_results_dir, trees_path):
-    """
-    Usage example:
-        python scripts/evaluate_results.py plot-knees \
-        -r /n/fs/ragr-research/users/wh8114/projects/troupe/example/results \
-        -t /n/fs/ragr-research/users/wh8114/projects/troupe/example/data/trees.pkl
-    """
-
-    with open(trees_path, "rb") as fp:
-        trees = pickle.load(fp)
-
-    regs = [0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1 , 3, 10]
-    used_regs = []
-    neg_llh = []
-    num_reachable_states = []
-    reg2num_states = {}
-    for reg in regs:
-        if reg == 0:
-            loss_path = f"{reg_results_dir}/reg={reg}/loss.txt"
-            model_dict_path = f"{reg_results_dir}/reg={reg}/model_dict.pkl"
-        else:
-            loss_path = f"{reg_results_dir}/reg={reg}/select_potencies/loss.txt"
-            model_dict_path = f"{reg_results_dir}/reg={reg}/select_potencies/model_dict.pkl"
-        if not os.path.isfile(loss_path):
-            print(f"Skipping: {loss_path}")
-            continue
-        with open(model_dict_path, "rb") as fp:
-            model_dict = pickle.load(fp)
-            inferred_rate_matrix = model_dict["rate_matrix"]
-            inferred_rate_matrix_np = inferred_rate_matrix.detach().numpy()
-            inferred_root_distribution = model_dict["root_distribution"]
-            starting_state = torch.argmax(inferred_root_distribution).item()
-            inferred_pi_params = torch.log(inferred_root_distribution * 1e20)
-            inferred_growth_rates = model_dict["growth_rates"]
-            idx2state = model_dict["idx2state"]
-            state2idx = {state: idx for idx, state in idx2state.items()}
-        prepped_trees = [_prep_log_tree(tree, len(inferred_rate_matrix), state2idx) for tree in trees]
-        inferred_log_lik = log_vec_likelihood(prepped_trees,
-                                            inferred_rate_matrix,
-                                            inferred_pi_params,
-                                            growth_rates=inferred_growth_rates,
-                                            state2idx=state2idx).item()
-
-        reachable_idxs = get_reachable_idxs(inferred_rate_matrix_np, starting_state, threshold=1e-6)
-        neg_llh.append(-inferred_log_lik)
-        num_reachable_states.append(len(reachable_idxs))
-        used_regs.append(reg)
-        reg2num_states[reg] = len(reachable_idxs)
-
-    # Set y-vals to be the minimum among all the same x-vals
-    y_ = neg_llh
-    x_ = num_reachable_states
-    state2liks = {x_val: [] for x_val in x_}
-    for x_val, y_val in zip(x_, y_):
-        state2liks[x_val].append(y_val)
-    y = []
-    x = list(set(x_))
-    x.sort()
-    for x_val in x:
-        y.append(min(state2liks[x_val]))
-    print("num states:  ", x)
-    print("likelihoods: ", y)
-    kneedle = KneeLocator(x, y, S=0.5, curve="convex", direction="decreasing")
-
-    if kneedle.knee is not None:
-        knee_x = kneedle.knee
-        knee_y = kneedle.knee_y
-        print("Knee:", knee_x, knee_y)
-    else:
-        knee_x = "Error"
-        knee_y = "Error"
-
-    with open(f"{reg_results_dir}/num_states_knee.txt", "w") as fp:
-        fp.write(f"knee_x\t{knee_x}\n")                 # x-value of highest curvature
-        fp.write(f"knee_y\t{knee_y}\n")                 # y-value of highest curvature
-
-    plt.plot(x, y, marker='o', linewidth=4, markersize=15)
-    plt.ylabel("Negative Log Likelihood")
-    if kneedle.knee is not None:
-        plt.plot([knee_x], [knee_y], marker='*', color ='red', markersize=30)
-    plt.xlabel("Number of states")
-    os.makedirs(f"{reg_results_dir}/figures", exist_ok=True)
-    plt.savefig(f"{reg_results_dir}/figures/loss_vs_num_states.pdf")
-    plt.clf()
-
-
-@cli.command()
 def evaluate_subsampling_experiment():
     """
     Usage example:
@@ -302,7 +191,7 @@ def evaluate_subsampling_experiment():
     num_terminal_states = 4
     num_observed_states = num_terminal_states
 
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+    working_dir = base_dir
     experiment_name = "subsampled_leaves"
     experiment_dir = f"{working_dir}/experiments/{experiment_name}"
     labels_are_ints = True
@@ -541,13 +430,40 @@ def evaluate_subsampling_experiment():
         plt.clf()
 
 
+
+
+@cli.command()
+def draw_graph():
+    """
+    Example usage:
+        python scripts/evaluate_results.py draw-graph
+    """
+    working_dir = f"{base_dir}/experiments"
+
+    # NOTE: To plot TLS graphs
+    # input_dir = f"{working_dir}/TLS/results_vanilla_likelihood/reg=1/select_potencies"
+
+    tree_path=f"{working_dir}/TLSC_constrained_transitions/processed_data/trees.pkl"
+    # input_dir = f"{working_dir}/TLSC_constrained_transitions/results/reg=0/select_potencies"
+    input_dir = f"{working_dir}/TLS_constrained_transitions/results/reg=10000/select_potencies"
+
+    terminal_path = f"{input_dir}/../../../terminal_labels.txt"
+    observed_potencies_path = f"{input_dir}/../../../observed_potencies.txt"
+
+    terminal_labels = get_terminal_labels(terminal_path)
+    observed_potencies = get_observed_potencies(observed_potencies_path)
+    figure_dir = f"{input_dir}/figures"
+    os.makedirs(figure_dir, exist_ok=True)
+    draw_graph_normal(input_dir, figure_dir, terminal_labels, tree_path=tree_path,
+                      observed_potencies=observed_potencies, thresh=1e-4)
+
 @cli.command()
 def draw_sse_graph():
     """
     Example usage:
         python scripts/evaluate_results.py draw-sse-graph
     """
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/experiments"
+    working_dir = f"{base_dir}/experiments"
 
     # NOTE: For plotting SSE
     input_dir = f"{working_dir}/TLS/results_SSE_unconstrained"
@@ -629,11 +545,9 @@ def draw_graph_normal(input_dir,
         inferred_root_distribution = model_dict["root_distribution"]
         inferred_pi_params = torch.log(inferred_root_distribution * 1e20)
         inferred_growth_rates = model_dict["growth_rates"]
-        idx2state_ = model_dict["idx2state"]
-        idx2state = {idx: str(state) for idx, state in idx2state_.items()}
+        idx2state = model_dict["idx2state"]
         state2idx = {state: idx for idx, state in idx2state.items()}
         terminal_idxs = [state2idx[state] for state in terminal_labels]
-    
 
     if tree_path is not None:
         with open(tree_path, "rb") as fp:
@@ -938,7 +852,7 @@ def evaluate_sample_efficiency_knees():
     num_states_ground_truth = 9
     thresh = 1e-3
     method = "relaxed"
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+    working_dir = base_dir
     experiment_name = "sample_efficiency_experiment"
     experiment_dir = f"{working_dir}/results/{experiment_name}/rate_matrix_{rate_matrix}"
 
@@ -1061,7 +975,7 @@ def evaluate_sample_efficiency_experiment():
     process_time = 2.35
     rate_matrix = 12
 
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+    working_dir = base_dir
     experiment_name = "sample_efficiency_experiment"
     experiment_dir = f"{working_dir}/results/{experiment_name}/rate_matrix_{rate_matrix}"
 
@@ -1283,7 +1197,7 @@ def draw_true_graph():
     idx2color = {idx: color_list[i] for i, idx in enumerate(terminal_idxs)}
     idx2state = {i: str(i) for i in terminal_idxs}
     state2idx = {state: idx for idx, state in idx2state.items()}
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/scripts/branching_process_experiment/model_params"
+    working_dir = f"{base_dir}/scripts/model_params"
     model_dict_path = f"{working_dir}/rate_matrix_{rate_matrix_num}.json"
     with open(model_dict_path, "r") as fp:
         model_dict = json.load(fp)
@@ -1327,7 +1241,7 @@ def get_experiment_potencies():
     true_num_states = 9
     experiment_name = "sample_efficiency_experiment"
 
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+    working_dir = base_dir
     experiment_dir = f"{working_dir}/results/{experiment_name}/rate_matrix_{rate_matrix}"
 
     methods = [
@@ -1393,7 +1307,7 @@ def evaluate_experiment():
         python scripts/evaluate_results.py evaluate-experiment
     """
 
-    working_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
+    working_dir = base_dir
     # experiment_name = "TLSC"
     experiment_name = "TLS"
     # experiment_name = "test_rates=10_num_trees=128_time=1.75_trial=0"
@@ -1596,7 +1510,7 @@ def plot_expected_population_composition():
 
     experiment_type = "TLSC"
     reg=0.3
-    experiment_dir = f"/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/experiments/{experiment_type}"
+    experiment_dir = f"{base_dir}/experiments/{experiment_type}"
     trial_dir = f"{experiment_dir}/results_vanilla_likelihood/reg={reg}/select_potencies"
     terminal2color = {
         'NeuralTube': '#1b9e77',
@@ -1751,6 +1665,118 @@ def plot_expected_population_composition():
 
     plt.savefig(f"{trial_dir}/expected_pop.pdf", dpi=400, bbox_inches="tight", transparent=True)
     plt.clf()
+
+
+
+
+
+
+@cli.command()
+@click.option('-i', '--results-dir', required=True, type=click.Path(exists=True),
+              help='Root results directory containing reg=X subdirectories.')
+@click.option('--thresh', default=1e-3, show_default=True,
+              help='Edge weight threshold; edges below this are hidden.')
+@click.option('--use-select-potencies/--no-select-potencies', default=True,
+              show_default=True,
+              help='If set, plot from select_potencies/ when available.')
+def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
+    """Plot differentiation maps for all reg=X results in a directory.
+
+    Treats each inferred Q matrix as a weighted directed graph with
+    self-edge weights equal to the inferred growth rates.
+
+    Usage example::
+
+        python scripts/evaluate_results.py plot-differentiation-maps \
+            -i /n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/experiments/varied_growth_rates/results/trial_1
+    """
+    reg_dirs = sorted(
+        [d for d in os.listdir(results_dir)
+         if os.path.isdir(os.path.join(results_dir, d)) and d.startswith('reg=')],
+        key=lambda s: float(s.split('=')[1])
+    )
+    if not reg_dirs:
+        click.echo(f"No reg=X directories found in {results_dir}")
+        return
+
+    for reg_dir_name in reg_dirs:
+        reg_path = os.path.join(results_dir, reg_dir_name)
+
+        # Choose select_potencies if available and requested
+        sp_path = os.path.join(reg_path, 'select_potencies')
+        if use_select_potencies and os.path.isdir(sp_path) \
+                and os.path.isfile(os.path.join(sp_path, 'model_dict.pkl')):
+            model_dir = sp_path
+            suffix = 'select_potencies'
+        elif os.path.isfile(os.path.join(reg_path, 'model_dict.pkl')):
+            model_dir = reg_path
+            suffix = 'full'
+        else:
+            click.echo(f"  Skipping {reg_dir_name}: no model_dict.pkl found")
+            continue
+
+        model_dict_path = os.path.join(model_dir, 'model_dict.pkl')
+        with open(model_dict_path, 'rb') as fp:
+            model_dict = pickle.load(fp)
+
+        rate_matrix = model_dict['rate_matrix'].detach().numpy()
+        root_distribution = model_dict['root_distribution']
+        growth_rates = model_dict['growth_rates'].detach().numpy()
+        idx2state = model_dict['idx2state']
+        idx2potency = model_dict.get('idx2potency', None)
+
+        starting_idx = torch.argmax(root_distribution).detach().item()
+
+        # Determine terminal states from idx2potency (self-only potency)
+        terminal_idxs = []
+        if idx2potency is not None:
+            for idx, potency in idx2potency.items():
+                state = idx2state[idx]
+                if potency == (state,) or potency == (idx,):
+                    terminal_idxs.append(idx)
+        terminal_idxs.sort()
+
+        # Build node labels and colors
+        node_labels = {i: str(idx2state[i]) for i in idx2state}
+        node_colors = {}
+        terminal_color_idx = 0
+        for idx in sorted(idx2state.keys()):
+            state = str(idx2state[idx])
+            if idx in terminal_idxs:
+                node_colors[state] = color_list[terminal_color_idx % len(color_list)]
+                terminal_color_idx += 1
+            else:
+                node_colors[state] = '#FFFFFF'
+
+        # Build state2potency for wedge coloring
+        state2potency = get_idx2potency(rate_matrix)
+        # Filter potencies to terminal states only
+        state2potency_filtered = {}
+        for idx, potency in state2potency.items():
+            filtered = [s for s in potency if s in terminal_idxs]
+            if filtered:
+                filtered.sort()
+                state2potency_filtered[idx] = tuple(filtered)
+
+        # Output
+        figure_dir = os.path.join(model_dir, 'figures')
+        os.makedirs(figure_dir, exist_ok=True)
+        outfile = os.path.join(figure_dir, 'differentiation_map.pdf')
+
+        draw_weighted_graph(
+            rate_matrix,
+            outfile,
+            thresh,
+            node_labels,
+            node_colors,
+            totipotent_state=starting_idx,
+            self_edges=growth_rates,
+            state2potency=state2potency_filtered,
+            terminal_idxs=terminal_idxs if terminal_idxs else None,
+        )
+        click.echo(f"  {reg_dir_name}/{suffix} -> {outfile}")
+
+    click.echo("Done.")
 
 
 if __name__ == '__main__':

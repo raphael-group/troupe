@@ -107,14 +107,6 @@ def main():
             if len(potency) > 0:
                 potency_sets.append(potency)
 
-        # print()
-        # print("Rate matrix:")
-        # print(Q)
-        # print("Long-term TPM:")
-        # print(long_term_transition_mat)
-        # print("terminal states:", terminals)
-        # print("potency sets:   ", potency_sets)
-
         rate_dir = f"{args.out_dir}/{rate_matrix_idx}"
 
         os.makedirs(rate_dir, exist_ok=True)

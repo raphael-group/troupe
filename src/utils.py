@@ -6,25 +6,44 @@ import math
 from scipy.linalg import expm
 from ete3 import TreeNode
 
-import warnings
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message="networkx backend defined more than once: nx-loopback")
     import networkx as nx
 
-import networkx as nx
 
+def _parse_state(state, is_int_state):
+    """Converts a state string to int if is_int_state is True.
+
+    Args:
+        state: The raw state value (typically a string).
+        is_int_state: If True, cast state to int.
+
+    Returns:
+        The state, cast to int if requested.
+    """
+    if is_int_state:
+        return int(state)
+    return state
 
 
 def get_terminal_labels(terminal_label_path, is_int_state=False):
+    """Reads terminal state labels from a text file, one label per line.
+
+    Args:
+        terminal_label_path: Path to a text file with one terminal label per
+            line, or None (which triggers a warning and returns an empty list).
+        is_int_state: If True, cast each label to int.
+
+    Returns:
+        A list of terminal labels.
+    """
     terminal_labels = []
     if terminal_label_path is not None:
         with open(terminal_label_path, "r") as fp:
             for line in fp.readlines():
                 if len(line) == 0:
                     continue
-                state = line.strip()
-                if is_int_state:
-                    state = int(state)
+                state = _parse_state(line.strip(), is_int_state)
                 terminal_labels.append(state)
     else:
         warnings.warn("terminal_label_path is None")
@@ -32,6 +51,18 @@ def get_terminal_labels(terminal_label_path, is_int_state=False):
     return terminal_labels
 
 def get_observed_potencies(observed_potencies_path, is_int_state=False):
+    """Reads observed potency mappings from a tab-delimited file.
+
+    Each line should have the format: ``state<TAB>potency1,potency2,...``
+
+    Args:
+        observed_potencies_path: Path to the potency file, or None (which
+            triggers a warning and returns an empty dict).
+        is_int_state: If True, cast states and potency entries to int.
+
+    Returns:
+        A dict mapping each state to a sorted tuple of its potencies.
+    """
     observed_potencies = {}
     if observed_potencies_path is not None:
         with open(observed_potencies_path, "r") as fp:
@@ -40,34 +71,50 @@ def get_observed_potencies(observed_potencies_path, is_int_state=False):
                 if len(line) == 0:
                     continue
                 entries = line.strip().split("\t")
-                state = entries[0]
+                state = _parse_state(entries[0], is_int_state)
                 potency = entries[1].split(",")
                 if is_int_state:
-                    state = int(state)
-                    new_potency = []
-                    for terminal_state in potency:
-                        new_potency.append(int(terminal_state))
-                    potency = new_potency
+                    potency = [int(terminal_state) for terminal_state in potency]
                 potency.sort()
-                observed_potencies[state] = tuple(potency)    
+                observed_potencies[state] = tuple(potency)
     else:
         warnings.warn("observed_potencies_path is None")
 
     return observed_potencies
 
 def is_ultrametric(tree):
-    """
-    Returns true if the tree is (roughly) ultrametric. A tree
+    """Checks whether a tree is (roughly) ultrametric.
+
+    A tree is ultrametric if all root-to-leaf distances are equal. This
+    function allows a relative tolerance of 1% when comparing distances.
+
+    Args:
+        tree: An ete3 TreeNode representing the root of the tree.
+
+    Returns:
+        True if all root-to-leaf distances are approximately equal.
     """
     leaf_dists = [tree.get_distance(leaf) for leaf in tree.get_leaves()]
     return all([math.isclose(leaf_dists[i-1], leaf_dists[i], rel_tol=1e-2) for i in range(1, len(leaf_dists))])
 
 def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0):
-    """
-    Given a numpy array that represents a rate matrix, determine the potency set for each node.
+    """Infers potency sets from a rate matrix via matrix exponentiation.
+
+    Computes the transition matrix at a large time scale (100 * tree_length)
+    and identifies reachable states for each row based on a probability
+    threshold.
+
+    Args:
+        rate_matrix: A numpy array representing the CTMC rate matrix.
+        eps: Minimum transition probability to consider a state reachable.
+        tree_length: Scaling factor for the time horizon.
+
+    Returns:
+        A dict mapping each state index to a sorted tuple of reachable
+        state indices.
     """
     transition_matrix = expm(100 * tree_length * rate_matrix)
-    
+
     n = len(transition_matrix)
     idx2list = {}
     for row in range(n):
@@ -75,11 +122,25 @@ def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0):
         for col in range(n):
             if transition_matrix[row, col] > eps:
                 idx2list[row].append(col)
-    
+
     potency_map = {idx: tuple(sorted(potency)) for idx, potency in idx2list.items()}
     return potency_map
 
 def get_reachable_idxs(adj_matrix, starting_state, threshold):
+    """Finds all states reachable from a starting state in a weighted graph.
+
+    Constructs a directed graph from the adjacency matrix (keeping only edges
+    above the threshold) and returns all descendants of the starting state,
+    plus the starting state itself.
+
+    Args:
+        adj_matrix: A 2D array-like of edge weights.
+        starting_state: The index of the source node.
+        threshold: Minimum weight for an edge to be included.
+
+    Returns:
+        A list of reachable state indices (including starting_state).
+    """
     G = nx.DiGraph()
     num_nodes = len(adj_matrix)
     for i in range(num_nodes):
@@ -89,12 +150,23 @@ def get_reachable_idxs(adj_matrix, starting_state, threshold):
                 G.add_edge(i, j, weight=weight)
 
     assert starting_state in G
-    
+
     reachable_nodes = list(nx.descendants(G, starting_state))
     reachable_nodes.append(starting_state)
     return reachable_nodes
 
 def binarize_tree(t):
+    """Converts a multifurcating tree into a binary tree.
+
+    Nodes with more than two children are resolved by inserting zero-length
+    intermediate nodes in a left-ladderized fashion.
+
+    Args:
+        t: An ete3 TreeNode (modified in place).
+
+    Returns:
+        The same TreeNode, now fully binary.
+    """
     to_fix = [n for n in t.traverse() if len(n.children) > 2]
     # Traverse over a snapshot of nodes to avoid issues while modifying children
     for node in to_fix:

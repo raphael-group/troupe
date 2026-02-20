@@ -1,37 +1,44 @@
 import torch
 import torch.nn.functional as F
-# from torchdiffeq import odeint_adjoint as odeint
-from torchdiffeq import odeint
 from torch import Tensor, DeviceObjType
 from ete3 import TreeNode
 from typing import Optional, Iterable, List
 import warnings
-from itertools import chain, combinations
 import sys
-import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Avoids Pickle Error: RecursionError: maximum recursion depth exceeded while pickling an object
-sys.setrecursionlimit(5000) 
+sys.setrecursionlimit(5000)
 
 
-# TODO: Make these more fitting for float64 precision
 EPS = 1e-30                 # Used as numerically stable zero
-INF = float('inf')          # Used to init log likelihoods 
+INF = float('inf')          # Used to init log likelihoods
 INF_SM = 30                 # Largest value in params that are softmax'd
 dtype=torch.float64
 torch.set_default_dtype(dtype)
 
-ode_atol = 1e-12
-ode_rtol = 1e-8
-
 class RateMatrixBuilder(torch.nn.Module):
-    """
-    Constructs rate matrix Q using constraints (potency, terminal, etc).
+    """Constructs a CTMC rate matrix Q from unconstrained parameters.
+
+    Uses softplus parameterization to ensure positive off-diagonal entries
+    and applies potency constraint masks to enforce biological realism.
+    The diagonal is set so that each row sums to zero.
+
+    Args:
+        num_states: Total number of states (hidden + observed).
+        num_hidden_states: Number of hidden (unobserved) states.
+        potency_constraints: Optional dict mapping state index to a tuple
+            of reachable state indices. If None, all transitions are allowed.
+        device: Torch device for parameters and buffers.
+        init_Q_params: Optional initial values for the free parameters,
+            either as a full matrix or a packed vector.
     """
     def __init__(self,
-                 num_states: int,                                   # Total num states: hidden + observed
+                 num_states: int,
                  num_hidden_states: Optional[int] = 0,
-                 potency_constraints: Optional[dict] = None,        # idx -> potency of original states
+                 potency_constraints: Optional[dict] = None,
                  device: Optional[DeviceObjType] = None,
                  init_Q_params: Optional[Tensor] = None
     ):
@@ -41,20 +48,8 @@ class RateMatrixBuilder(torch.nn.Module):
         self.num_hidden_states = num_hidden_states
         self.num_observed_states = num_states-num_hidden_states
 
-        def _build_mask(potency_constraints):
-            assert len(potency_constraints) == self.num_states
-            mask = torch.zeros((self.num_states, self.num_states), dtype=bool) # 0 if there should be a zero at this entry
-            for i in range(num_states):
-                from_potency = potency_constraints[i]
-                for j in range(num_states):
-                    to_potency = potency_constraints[j]
-                    # `to` is contained in `from`
-                    mask[i, j] = all([t in from_potency for t in to_potency]) and i != j
-
-            return mask
-
         if potency_constraints is not None:
-            mask = _build_mask(potency_constraints)
+            mask = RateMatrixBuilder._build_mask(potency_constraints, num_states)
         else:
             mask = torch.ones((self.num_states, self.num_states), dtype=bool)
         self.register_buffer("potency_constraint_mask", mask)
@@ -75,7 +70,37 @@ class RateMatrixBuilder(torch.nn.Module):
                 assert len(init_vec) == len(self.free_row_idx), "init_Q_params has wrong length."
         self.free_params = torch.nn.Parameter(init_vec, requires_grad=True)
 
+    @staticmethod
+    def _build_mask(potency_constraints, num_states):
+        """Builds a boolean mask from potency constraints.
+
+        Entry (i, j) is True if state j's potency is a subset of state i's
+        potency and i != j, meaning state i can transition to state j.
+
+        Args:
+            potency_constraints: Dict mapping state index to a tuple of
+                reachable state indices.
+            num_states: Total number of states.
+
+        Returns:
+            A boolean tensor of shape (num_states, num_states).
+        """
+        assert len(potency_constraints) == num_states
+        mask = torch.zeros((num_states, num_states), dtype=bool)
+        for i in range(num_states):
+            from_potency = potency_constraints[i]
+            for j in range(num_states):
+                to_potency = potency_constraints[j]
+                mask[i, j] = all([t in from_potency for t in to_potency]) and i != j
+        return mask
+
     def forward(self) -> Tensor:
+        """Constructs the rate matrix Q from the free parameters.
+
+        Returns:
+            The rate matrix Q (shape: [num_states, num_states]) with
+            non-negative off-diagonals and rows summing to zero.
+        """
         n = self.num_states
         Q_off = torch.zeros((n, n), dtype=dtype, device=self.device)
         # Only free entries get positive rates via softplus
@@ -85,8 +110,16 @@ class RateMatrixBuilder(torch.nn.Module):
 
 
 class TreeTensorizer:
-    """
-    Converts ete3 TreeNodes into tensor representations for pruning.
+    """Converts ete3 TreeNodes into tensor representations for batched pruning.
+
+    Processes a collection of trees into postorder indices, child arrays,
+    parent arrays, branch lengths, leaf partials, level assignments, and
+    absolute times suitable for the ``FelsensteinPruner``.
+
+    Args:
+        trees: An iterable of ete3 TreeNode objects.
+        num_states: The total number of states.
+        device: Torch device for all tensors.
     """
     def __init__(self, trees: Iterable[TreeNode], num_states: int, device: DeviceObjType):
         self.num_states = num_states
@@ -101,11 +134,30 @@ class TreeTensorizer:
         self.levels = []
         self.abs_times = []
         self._prepare_all()
-        # Build one global, sorted, unique time grid across the forest
-        all_times = torch.cat([t for t in self.abs_times], dim=0)
-        self.global_time_grid, _ = torch.sort(torch.unique(all_times))
+
+    def get_tree_tensors(self, tree_idx):
+        """Returns all tensor data for a single tree by index.
+
+        Args:
+            tree_idx: Integer index into the tree list.
+
+        Returns:
+            A tuple of (postorder, children, parents, branch_lens,
+            partials, leaf_idxs, levels, abs_times).
+        """
+        return (
+            self.postorders[tree_idx],
+            self.children[tree_idx],
+            self.parents[tree_idx],
+            self.branch_lens[tree_idx],
+            self.partials[tree_idx],
+            self.leaf_idxs[tree_idx],
+            self.levels[tree_idx],
+            self.abs_times[tree_idx]
+        )
 
     def _prepare_all(self):
+        """Tensorizes all trees and stores the results."""
         for tree in self.trees:
             post, childs, parents, blens, partial, leaf_idxs, levels, abs_times = self._prep_single(tree)
             self.postorders.append(post)
@@ -118,6 +170,19 @@ class TreeTensorizer:
             self.abs_times.append(abs_times)
 
     def _prep_single(self, tree: TreeNode):
+        """Tensorizes a single ete3 tree.
+
+        Deep-copies the tree, adds a unifurcating root if needed, and
+        extracts postorder indices, child arrays, parent arrays, branch
+        lengths, leaf partials, level assignments, and absolute times.
+
+        Args:
+            tree: An ete3 TreeNode with ``.state`` attributes on leaves.
+
+        Returns:
+            A tuple of tensors: (postorder, children, parents, branch_lens,
+            partials, leaf_idxs, levels, abs_times).
+        """
         tree = tree.copy("deepcopy")
         if len(tree.children) != 1:
             warnings.warn("We require a unifurcating root with branch length 0. Adding one now.")
@@ -185,183 +250,51 @@ class TreeTensorizer:
 
 
 class FelsensteinPruner:
-    """
-    Implements log-space likelihood computation via pruning.
+    """Implements Felsenstein's pruning algorithm in log-space on tensorized trees.
+
+    Processes nodes in batched level-order passes, computing transition
+    matrices via ``torch.matrix_exp`` and accumulating log partial
+    likelihoods.
+
+    Args:
+        num_states: The total number of states.
     """
     def __init__(self, num_states: int):
         self.num_states = num_states
-        self._cache = None  # will hold {time_grid, Phi, invPhi, rho, k}
-
-    class Logit_E_ODE(torch.nn.Module):
-        def __init__(self, lam, Q, eps=EPS):
-            super().__init__()
-            self.lam = lam
-            self.Q = Q
-            self.eps = eps
-        def forward(self, t, u):
-            E = torch.sigmoid(u)
-            QE = self.Q @ E
-            return -self.lam + QE / (E * (1.0 - E) + self.eps)
-
-    @staticmethod
-    def _solve_E_timeseries(lam, Q, rho, T, n_grid=1024):
-        k = len(lam)
-        one_minus_rho = max(EPS, float(1.0 - rho))
-        u0_scalar = math.log(one_minus_rho) - math.log(1.0 - one_minus_rho)
-        u0 = torch.full((k,), u0_scalar, device=lam.device, dtype=lam.dtype)
-        rhs = Logit_E_ODE(lam, Q)
-        ts = torch.linspace(0.0, float(T), steps=n_grid, device=lam.device, dtype=lam.dtype)
-        us = odeint(rhs, u0, ts, rtol=ode_rtol, atol=ode_atol)  # (m,k)
-        Es = torch.sigmoid(us)                                  # (m,k)
-        return ts, Es
-
-    class _EInterp(torch.nn.Module):
-        def __init__(self, ts, Es):
-            super().__init__()
-            self.ts = ts
-            self.Es = Es
-            self.m = len(ts)
-        def forward(self, t):
-            t = t.clamp(min=self.ts[0], max=self.ts[-1])
-            idx = torch.searchsorted(self.ts, t).clamp(1, self.m - 1)
-            t0 = self.ts[idx-1]; t1 = self.ts[idx]
-            w = (t - t0) / (t1 - t0 + 1e-12)
-            E0 = self.Es[idx-1]; E1 = self.Es[idx]
-            return (1.0 - w) * E0 + w * E1
-
-    class _FundPhi_ODE(torch.nn.Module):
-        """Phi'(t) = A(t) Phi(t), A(t)=Q + diag(-lam + 2lam E(t))"""
-        def __init__(self, lam, Q, E_interp):
-            super().__init__()
-            self.lam = lam
-            self.Q = Q
-            self.E_interp = E_interp
-        def forward(self, t, Phi):
-            E_t = self.E_interp(t)                         # (k,)
-            A_diag = -self.lam + 2.0 * self.lam * E_t      # (k,)
-            return (self.Q @ Phi) + A_diag.unsqueeze(1) * Phi
-
-    # Precompute fundamental matrix for all trees
-    def prepare_global_cache(self,
-                             time_grid: Tensor,
-                             lam: Tensor,
-                             Q: Tensor,
-                             rho: float,
-                             n_grid: Optional[int] = 1024):
-        """
-        time_grid: sorted unique absolute times across ALL trees, shape (M,)
-        """
-        device = lam.device
-        dtype = lam.dtype
-        k = len(lam)
-        assert time_grid.ndim == 1 and torch.all(time_grid[:-1] <= time_grid[1:]), "time_grid must be sorted."
-
-        # 1) Solve E(t) once on [0, T_max] to build an interpolant
-        T_max = float(time_grid[-1].item())
-        # Use a dense grid for E(t) interpolation
-        ts_dense = torch.linspace(0.0, T_max, steps=n_grid, device=device, dtype=dtype)
-        u0_scalar = torch.log(torch.tensor(1 - rho, device=device, dtype=torch.float64).clamp_min(1e-12)) \
-                  - torch.log(torch.tensor(rho, device=device, dtype=torch.float64))
-        u0 = u0_scalar.repeat(k)
-        us = odeint(self.Logit_E_ODE(lam, Q), u0, ts_dense, rtol=ode_rtol, atol=ode_atol) # (n_grid,k)
-        Es = torch.sigmoid(us)                                                            # (n_grid,k)   
-        E_interp = self._EInterp(ts_dense, Es)
-
-        # 2) Solve a single matrix ODE to get Phi at all required times
-        Phi0 = torch.eye(k, device=device, dtype=dtype)
-        # Phi_seq: (M, k, k) with Phi(time_grid[i])
-        Phi_seq = odeint(self._FundPhi_ODE(lam, Q, E_interp), Phi0, time_grid, rtol=ode_rtol, atol=ode_atol)
-        
-        # # TODO: Remove this check for a speed up
-        # # This should be cheap to check for small k
-        # cond = torch.linalg.cond(Phi_seq)   # (M,)
-        # if torch.any(cond > 1e14):
-        #     max_condition = torch.max(cond)
-        #     warnings.warn(f"Phi(t) is ill-conditioned at some times (cond = {max_condition})." + \
-        #                    "Consider tighter rtol/atol or smaller time span.")
-
-        self._cache = {
-            "time_grid": time_grid,
-            "Phi": Phi_seq,
-            "rho": float(rho),
-            "k": k
-        }
-
-    def build_transitions_from_cache(self,
-                                     abs_times: Tensor,
-                                     parents: Tensor,
-                                     branch_lens: Tensor) -> Tensor:
-        """
-        Build per-edge transition matrices for one tree using cached Phi.
-
-        Returns: trans_mat (N, S, S) where row i is the edge parent(i)->i (I for root or zero-length).
-        """
-        assert self._cache is not None, "Call prepare_global_cache(...) first."
-        Phi = self._cache["Phi"]         # (M,k,k)
-        time_grid = self._cache["time_grid"]
-        device = Phi.device
-        dtype = Phi.dtype
-        N = len(abs_times)
-        k = Phi.shape[1]
-
-        # Map abs_times to indices into the global grid (exact values --> searchsorted)
-        # Both are produced by the tensorizer; equality holds numerically.
-        child_idx = torch.searchsorted(time_grid, abs_times)              # (N,)
-        # Parents < 0 (root) get dummy index 0; we'll mask them to identity
-        parent_idx = torch.where(parents >= 0,
-                                 torch.searchsorted(time_grid, abs_times[parents.clamp_min(0)]),
-                                 torch.zeros_like(parents))
-
-        Phi_p = Phi[parent_idx]     # (N,k,k)
-        Phi_c = Phi[child_idx]
-        
-        I = torch.eye(k, device=device, dtype=dtype)
-        X_T = torch.linalg.solve(Phi_c.transpose(-1,-2) + EPS * I, Phi_p.transpose(-1,-2))
-        trans_mat = X_T.transpose(-1,-2)
-
-        # Identity on roots / zero-length edges
-        I = torch.eye(k, device=device, dtype=dtype)
-        mask = (parents < 0) | (branch_lens <= EPS)
-        if mask.any():
-            trans_mat = trans_mat.clone()
-            trans_mat[mask] = I
-
-        # Numerical safety
-        trans_mat = trans_mat.clamp_min(EPS)
-        return trans_mat
 
     def log_prune(
         self,
         postorder: Tensor,
         children: Tensor,
-        parents: Tensor,
         branch_lens: Tensor,
         init_partials: Tensor,
         Q: Tensor,
         levels: Tensor,
-        leaf_idxs: Optional[Tensor] = None,
-        growth_rates: Optional[Tensor] = None,
-        rho: Optional[float] = 1.0,
-        abs_times: Optional[Tensor] = None) -> Tensor:
+        growth_rates: Optional[Tensor] = None) -> Tensor:
+        """Computes root log-partial-likelihoods via batched level-order pruning.
+
+        Args:
+            postorder: 1D tensor of node indices in postorder.
+            children: 2D tensor of child indices (shape: [N, 2]), padded
+                with -1 for missing children.
+            branch_lens: 1D tensor of branch lengths (shape: [N]).
+            init_partials: Initial log-partial matrix (shape: [N, num_states]).
+            Q: Rate matrix (shape: [num_states, num_states]).
+            levels: 1D tensor of node level assignments.
+            growth_rates: Optional 1D tensor of birth rates per type.
+
+        Returns:
+            The log-partial-likelihood vector at the root (shape:
+            [num_states]).
+        """
 
         log_partials = init_partials.clone()
 
-        # Apply present-day sampling probability rho at the tips:
-        if (rho is not None) and (rho < 1.0) and (leaf_idxs is not None):
-            log_partials[leaf_idxs] = log_partials[leaf_idxs] + math.log(rho)
+        rate_matrix = Q - torch.diag(growth_rates) if growth_rates is not None else Q
+        scaled      = rate_matrix.unsqueeze(0) * branch_lens.view(-1,1,1)
+        trans_mat   = torch.matrix_exp(scaled).to(Q.dtype)
+        trans_mat[branch_lens <= EPS] = torch.eye(self.num_states, device=Q.device, dtype=Q.dtype)
 
-        if rho == 1.0:
-            rate_matrix = Q - torch.diag(growth_rates) if growth_rates is not None else Q
-            scaled      = rate_matrix.unsqueeze(0) * branch_lens.view(-1,1,1)
-            trans_mat   = torch.matrix_exp(scaled).to(Q.dtype)
-            trans_mat[branch_lens <= EPS] = torch.eye(self.num_states, device=Q.device, dtype=Q.dtype)
-        else:
-            assert abs_times is not None, "Need abs_times for rho < 1.0"
-            assert growth_rates is not None, "Need growth_rates (lam) for rho < 1.0"
-
-            # Use precomputed global cache
-            trans_mat = self.build_transitions_from_cache(abs_times, parents, branch_lens)
-        
         assert not torch.isnan(trans_mat).any()
         log_trans = torch.log(trans_mat.clamp_min(EPS))
 
@@ -398,8 +331,15 @@ class FelsensteinPruner:
 
 
 class BaseLikelihoodModel(torch.nn.Module):
-    """
-    Abstract base for likelihood models.
+    """Abstract base class for CTMC likelihood models.
+
+    Handles tree tensorization and pruner initialization. Subclasses must
+    implement ``forward(tree_idx)``.
+
+    Args:
+        trees: An iterable of ete3 TreeNode objects.
+        num_states: The total number of states.
+        device: Torch device (default: CPU).
     """
     def __init__(
         self,
@@ -419,8 +359,19 @@ class BaseLikelihoodModel(torch.nn.Module):
 
 
 class CTMCLikelihoodModel(BaseLikelihoodModel):
-    """
-    ... .
+    """CTMC likelihood model for phylogenetic trees.
+
+    Combines a ``RateMatrixBuilder`` for rate matrix construction with
+    ``FelsensteinPruner`` for log-likelihood computation. Supports optional
+    per-type growth rates.
+
+    Args:
+        trees: An iterable of ete3 TreeNode objects.
+        num_states: The total number of states.
+        Q_params: Optional initial rate matrix parameters.
+        pi_params: Optional initial root distribution logits.
+        device: Torch device (default: CPU).
+        growth_params: Optional initial growth rate parameters.
     """
     def __init__(
         self,
@@ -429,16 +380,10 @@ class CTMCLikelihoodModel(BaseLikelihoodModel):
         Q_params: Optional[Tensor] = None,
         pi_params: Optional[Tensor] = None,
         device: Optional[DeviceObjType] = None,
-        growth_params: Optional[Tensor] = None,
-        rho: Optional[float] = 1.0
+        growth_params: Optional[Tensor] = None
     ):
         super().__init__(trees, num_states, device)
-        self.rho = rho
         self.rate_builder = RateMatrixBuilder(num_states, device=self.device, init_Q_params=Q_params)
-        # self.Q_params = torch.nn.Parameter(
-        #     Q_params.to(dtype) if Q_params is not None else
-        #     torch.ones((num_states, num_states), device=self.device, dtype=dtype), requires_grad=True
-        # )
         self.pi_params = torch.nn.Parameter(
             pi_params.to(dtype) if pi_params is not None else
             torch.zeros(num_states, device=self.device, dtype=dtype), requires_grad=True
@@ -447,81 +392,74 @@ class CTMCLikelihoodModel(BaseLikelihoodModel):
             self.growth_params = torch.nn.Parameter(growth_params.to(dtype), requires_grad=True)
         else:
             self.growth_params = None
-    
-    def prepare_numerical_pruner(self,
-                                 lam: Tensor,
-                                 Q: Tensor,
-                                 rho: float):
-        """
-        Precompute E(t) and Phi(t) once over all birth times for rho < 1.
-        Call this once per parameter update before iterating over trees.
-        """
-        if rho != self.rho:
-            warnings.warn(f"Resetting rho in model {self.rho} -> {rho}")
-            self.rho = rho
-        time_grid = self.tree_tens.global_time_grid.to(device=self.device)
-        self.pruner.prepare_global_cache(time_grid, lam, Q, rho)
 
     def forward(self, tree_idx: int) -> Tensor:
+        """Computes the log-likelihood for a single tree.
+
+        Args:
+            tree_idx: Index of the tree to evaluate.
+
+        Returns:
+            The log-likelihood (a scalar tensor).
+        """
         Q = self.rate_builder.forward()
-        post, children, parents, blens, init_p, leaf_idxs, levels, abs_times = (
-            self.tree_tens.postorders[tree_idx],
-            self.tree_tens.children[tree_idx],
-            self.tree_tens.parents[tree_idx],
-            self.tree_tens.branch_lens[tree_idx],
-            self.tree_tens.partials[tree_idx],
-            self.tree_tens.leaf_idxs[tree_idx],
-            self.tree_tens.levels[tree_idx],
-            self.tree_tens.abs_times[tree_idx]
+        post, children, _parents, blens, init_p, _leaf_idxs, levels, _abs_times = (
+            self.tree_tens.get_tree_tensors(tree_idx)
         )
         if self.growth_params is not None:
-            growth_rates = F.softplus(self.growth_params)
+            growth_rates = F.softplus(self.growth_params, threshold=10)
         else:
             growth_rates = None
-        
+
         root_log_partial = self.pruner.log_prune(
             post,
             children,
-            parents,
             blens,
             init_p,
             Q,
             levels,
-            leaf_idxs,
-            growth_rates=growth_rates,
-            abs_times=abs_times,
-            rho=self.rho
+            growth_rates=growth_rates
         )
         log_pi = self.pi_params - torch.logsumexp(self.pi_params, dim=0)
         return torch.logsumexp(root_log_partial + log_pi, dim=0)
-    
+
     def get_Q_params(self):
+        """Returns the free parameters of the rate matrix builder."""
         return self.rate_builder.free_params
-    
+
     def get_pi_params(self):
+        """Returns the root distribution logit parameters."""
         return self.pi_params
-    
+
     def get_rate_matrix(self) -> Tensor:
-        """
-        Returns the rate matrix.
-        """
+        """Returns the constructed rate matrix Q."""
         rate_matrix = self.rate_builder.forward()
         return rate_matrix
-    
+
     def get_root_distribution(self) -> Tensor:
-        """
-        Returns the state distribution at the root node.
-        """
+        """Returns the root state distribution (softmax of pi_params)."""
         root_distr = F.softmax(self.pi_params, dim=0)
         return root_distr
 
 
 class PureBirthLikelihoodModel(CTMCLikelihoodModel):
-    """
-    Pure-birth branching process likelihood model for a list of trees.
+    """Pure-birth branching process likelihood model.
 
-    NOTE: Assumes that tree leaves are labeled with the indices. E.g., we've already ran
-          for leaf in tree   leaf.state = state2idx[leaf.state]
+    Extends ``CTMCLikelihoodModel`` with per-type growth rates, potency
+    constraints, and optional fixed start state. Assumes tree leaves are
+    labeled with integer state indices.
+
+    Args:
+        trees: An iterable of ete3 TreeNode objects.
+        num_states: Total number of states (hidden + observed).
+        Q_params: Initial rate matrix parameters.
+        pi_params: Initial root distribution logits.
+        growth_params: Initial growth rate parameters.
+        num_hidden: Number of hidden states.
+        idx2potency: Optional dict mapping state index to potency tuple.
+        device: Torch device (default: CPU).
+        idx2state: Optional dict mapping state index to state label.
+        start_state: Optional index of the fixed starting state.
     """
     def __init__(
         self,
@@ -530,40 +468,37 @@ class PureBirthLikelihoodModel(CTMCLikelihoodModel):
         Q_params: Tensor,
         pi_params: Tensor,
         growth_params: Tensor,
-        terminal_states: Optional[List] = None,
+        optimize_growth: bool = True,
         num_hidden: Optional[int] = None,
         idx2potency: Optional[dict] = None,
         device: Optional[DeviceObjType] = None,
         idx2state: Optional[dict] = None,
-        start_state: Optional[int] = None,
-        subsampling_rate: Optional[float] = 1.0
+        start_state: Optional[int] = None
     ):
         super().__init__(trees = trees,
                          num_states = num_states,
                          Q_params = Q_params,
                          pi_params = pi_params,
                          device = device,
-                         growth_params = growth_params,
-                         rho = subsampling_rate)
+                         growth_params = growth_params)
         assert self.growth_params is not None
         assert num_hidden is not None or idx2potency is not None
 
-        print(f"=> Saving RateMatrixBuilder with potency sets={idx2potency}")
+        logger.info("Saving RateMatrixBuilder with potency sets=%s", idx2potency)
         self.rate_builder = RateMatrixBuilder(num_states,
                                               num_hidden_states=num_hidden,
                                               potency_constraints=idx2potency,
                                               device=self.device,
                                               init_Q_params=Q_params)
-        
-        # # NOTE: For debugging purposes
-        # print(idx2state)
-        # print(self.rate_builder.potency_constraint_mask)
-        
+
+        logger.debug("idx2state: %s", idx2state)
+        logger.debug("potency_constraint_mask:\n%s", self.rate_builder.potency_constraint_mask)
+
         if start_state is not None:
             if pi_params is not None:
-                print("=> Overriding pi params and using a starting state of", idx2state[start_state])
+                logger.info("Overriding pi params and using a starting state of %s", idx2state[start_state])
                 if idx2potency is not None:
-                    print("=> Starting state has potency of", idx2potency[start_state])
+                    logger.info("Starting state has potency of %s", idx2potency[start_state])
             # Initialize root distribution to be concentrated on starting state
             self.pi_params = torch.nn.Parameter(
                 -INF_SM * torch.ones(num_states, device=self.device, dtype=dtype), requires_grad=False
@@ -571,7 +506,7 @@ class PureBirthLikelihoodModel(CTMCLikelihoodModel):
             self.pi_params[start_state] = INF_SM
         else:
             # infer root distribution only if there are no observed progenitors
-            print("=> Inferring root distribution")
+            logger.info("Inferring root distribution")
             self.pi_params.requires_grad = True
 
         if idx2potency is not None:
@@ -582,19 +517,16 @@ class PureBirthLikelihoodModel(CTMCLikelihoodModel):
                 if len(potency) > len(idx2potency[root_idx]):
                     root_idx = idx
             self.root_idx = root_idx
+            # Terminal states: those whose potency set contains only themselves
+            self.terminal_idx = [idx for idx, potency in idx2potency.items() if potency == (idx,)]
 
-            state2idx = {state: idx for idx, state in idx2state.items()}
-            # self.terminal_idx = torch.tensor([state2idx[state] for state in terminal_states], device=self.device)
-        
         self.num_hidden = num_hidden
-        self.growth_params.requires_grad = True
+        self.growth_params.requires_grad = optimize_growth
         self.idx2state = idx2state
-        self.state2idx = state2idx
-        self.states = set(idx2state.values())
+        self.state2idx = {state: idx for idx, state in idx2state.items()} if idx2state is not None else None
+        self.states = set(idx2state.values()) if idx2state is not None else None
         self.idx2potency = idx2potency
 
     def get_growth_rates(self):
+        """Returns the growth rates (softplus of growth_params)."""
         return F.softplus(self.growth_params, threshold=10)
-
-
-
