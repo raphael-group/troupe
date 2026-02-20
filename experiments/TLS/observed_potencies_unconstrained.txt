@@ -1,0 +1,6 @@
+NeuralTube	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
+Somite	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
+Endoderm	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
+PCGLC	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
+NMPs	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
+Endothelial	Endoderm,Endothelial,NeuralTube,PCGLC,Somite
