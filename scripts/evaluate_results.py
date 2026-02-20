@@ -1685,10 +1685,10 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
     Treats each inferred Q matrix as a weighted directed graph with
     self-edge weights equal to the inferred growth rates.
 
-    Usage example::
-
+    Usage example:
+        BASE_DIR=/Users/william_hs/Desktop/Projects/troupe;
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i /n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/experiments/varied_growth_rates/results/trial_1
+            -i $BASE_DIR/example/results
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)
