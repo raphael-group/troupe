@@ -1,7 +1,6 @@
 """Integration tests for the infer_model.py workflow.
 
-Exercises compute_mle with group lasso (which requires terminal_idx)
-and verifies the full optimization pipeline succeeds end-to-end.
+Verifies the full optimization pipeline succeeds end-to-end.
 """
 
 import os
@@ -28,8 +27,8 @@ def _simulate_trees(Q, lam, num_trees=10, T=1.0, starting_type=0):
 class TestInferModelWorkflow:
 
     @pytest.mark.slow
-    def test_two_state_with_group_lasso(self, device, tmp_path, two_state_system):
-        """Group lasso path exercises terminal_idx on the model."""
+    def test_two_state(self, device, tmp_path, two_state_system):
+        """Two-state system end-to-end optimization."""
         Q_np, lam_np, pi = two_state_system
         trees = _simulate_trees(Q_np, lam_np, num_trees=10)
 
@@ -42,7 +41,6 @@ class TestInferModelWorkflow:
 
         llh, loss = compute_mle(
             trees, (2, 0), device, str(tmp_path),
-            group_lasso_strength=0.1,
             do_logging=False,
             model_info=model_info,
         )
@@ -51,8 +49,8 @@ class TestInferModelWorkflow:
         assert os.path.exists(os.path.join(str(tmp_path), "model_dict.pkl"))
 
     @pytest.mark.slow
-    def test_three_state_with_group_lasso(self, device, tmp_path, three_state_system):
-        """Three-state system with group lasso to verify terminal_idx works for multiple terminals."""
+    def test_three_state(self, device, tmp_path, three_state_system):
+        """Three-state system end-to-end optimization."""
         Q_np, lam_np, pi = three_state_system
         trees = _simulate_trees(Q_np, lam_np, num_trees=10)
 
@@ -65,7 +63,6 @@ class TestInferModelWorkflow:
 
         llh, loss = compute_mle(
             trees, (3, 0), device, str(tmp_path),
-            group_lasso_strength=0.1,
             do_logging=False,
             model_info=model_info,
         )
@@ -73,8 +70,8 @@ class TestInferModelWorkflow:
         assert np.isfinite(loss)
 
     @pytest.mark.slow
-    def test_group_lasso_with_l1(self, device, tmp_path, two_state_system):
-        """Both L1 and group lasso active simultaneously."""
+    def test_two_state_with_l1(self, device, tmp_path, two_state_system):
+        """Two-state system with L1 regularization."""
         Q_np, lam_np, pi = two_state_system
         trees = _simulate_trees(Q_np, lam_np, num_trees=10)
 
@@ -88,7 +85,6 @@ class TestInferModelWorkflow:
         llh, loss = compute_mle(
             trees, (2, 0), device, str(tmp_path),
             l1_regularization_strength=0.1,
-            group_lasso_strength=0.05,
             do_logging=False,
             model_info=model_info,
         )

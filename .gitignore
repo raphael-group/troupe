@@ -12,6 +12,7 @@ TODOs.txt
 *.nwk
 *loss.txt
 *.txt
+!requirements.txt
 *.pdf
 *.venv
 *.tsv

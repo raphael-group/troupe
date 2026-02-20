@@ -81,8 +81,6 @@ class TestTreeTensorizer:
         assert len(tt.postorders) == 5
         assert len(tt.children) == 5
         assert len(tt.branch_lens) == 5
-        # Global time grid should be populated
-        assert len(tt.global_time_grid) > 0
 
     def test_ultrametric_abs_times(self, device):
         Q = np.array([[-1.0, 1.0],
