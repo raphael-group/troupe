@@ -22,14 +22,12 @@ from scipy.linalg import expm
 import warnings
 
 import numpy as np
-from branching_simulation import simulate_tree
-
-seed_val = 123
-rng = np.random.default_rng(seed=seed_val)
+# from branching_simulation import simulate_tree
+from classe_branching_simulation import simulate_tree
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CLI wrapper for simulate_tree_state in src/simulation.py."
+        description="CLI wrapper for simulate_tree."
     )
     parser.add_argument(
         "-n", "--num_trees",
@@ -40,8 +38,14 @@ def main():
     parser.add_argument(
         "-t", "--time",
         type=float,
-        default=9999,
-        help="Time cutoff for simulation (default: 9999)."
+        default=1.0,
+        help="Time cutoff for simulation (default: 1.0)."
+    )
+    parser.add_argument(
+        "-s", "--sample_probability",
+        type=float,
+        default=1.0,
+        help="Probability of sampling each leaf (default: 1.0)."
     )
     parser.add_argument(
         "-b", "--num_trials",
@@ -52,139 +56,103 @@ def main():
     parser.add_argument(
         "-o", "--out_dir",
         type=str,
-        default="/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml/simulated_data/branching_process_experiment",
-        help="Directory to save simulated data in."
+        help="Directory to save simulated data in. Assumes model JSON file is located in out_dir/model.json"
     )
     parser.add_argument(
-        "-v", "--rate_matrix",
-        type=int
+        "-r", "--remove_progenitors",
+        action="store_true",
+        help="Determines whether to prune progenitor types (after subsampling)."
     )
     args = parser.parse_args()
 
-    base_dir = "/n/fs/ragr-research/users/wh8114/projects/cell-diff-via-ml"
-    input_dir = f"{base_dir}/scripts/branching_process_experiment/model_params"
+    input_path = f"{args.out_dir}/model.json"
+
+    rng = np.random.default_rng(seed=1234)
+
+    with open(input_path, 'r') as f:
+        data_dict = json.load(f)
+    birth_kernel = np.array(data_dict["birth_kernel"])
+    growth_rates = np.array(data_dict["growth_rates"])
+    init_distribution = np.array(data_dict["init_distribution"])
 
 
-    matrix_idxs = [int(args.rate_matrix)]
-
-    rate_matrices = {}
-    growth_rates = {}
-    init_distributions = {}
-    for i in matrix_idxs:
-        filename = f"{input_dir}/rate_matrix_{i}.json"
-        with open(filename, 'r') as f:
-            data_dict = json.load(f)
-        rate_matrices[i] = np.array(data_dict["rate_matrix"])
-        growth_rates[i] = np.array(data_dict["growth_rates"])
-        if "init_distribution" in data_dict:
-            init_distributions[i] = np.array(data_dict["init_distribution"])
-
+    terminals = [str(i) for i in range(len(birth_kernel)) if birth_kernel[i,i] == 1.0]
 
     # Each simulation needs a different seed
-    # TODO: Change this to be samples without replacement and choose exactly args.num_trees * args.num_trials * len(matrix_idxs) seeds
-    num_seeds = args.num_trees * args.num_trials * len(matrix_idxs)
+    num_seeds = args.num_trees * args.num_trials
     seeds = [rng.choice(num_seeds, replace=False) for _ in range(num_seeds)]
 
-    for i in range(len(matrix_idxs)):
-        rate_matrix_idx = matrix_idxs[i]
-        Q = np.array(rate_matrices[rate_matrix_idx])
-        lam = np.array(growth_rates[rate_matrix_idx])
-        
-        terminals = []
-        for l in range(len(Q)):
-            if abs(Q[l, l]) <= len(Q) * 1e-2:    # TODO: This threshold needs to adapt
-                terminals.append(l)
+    for trial in range(args.num_trials):
+        output_dir = f"{args.out_dir}/trees_{args.num_trees}/time_{args.time}/sample_{args.sample_probability}/trial_{trial}"
+        os.makedirs(output_dir, exist_ok=True)
+        tree_list = []
+        num_terminal = 0
+        total_leaves = 0
+        total_type_counts = Counter()
+        for j in range(args.num_trees):
+            seed = seeds[j + trial * args.num_trees]
 
-        long_term_transition_mat = expm(100 * Q)
-        potency_sets = []
-        num_progenitors = len(Q) - len(terminals)
-        for l in range(num_progenitors):
-            potency_idx = l + len(terminals)
-            potency = []
-            for k in terminals:
-                if long_term_transition_mat[potency_idx, k] > 1e-6:
-                    potency.append(k)
-            if len(potency) > 0:
-                potency_sets.append(potency)
+            tree = simulate_tree(birth_kernel,
+                                growth_rates,
+                                np.argmax(init_distribution),
+                                T=args.time,
+                                seed=seed,
+                                sample_probability=args.sample_probability)
 
-        rate_dir = f"{args.out_dir}/{rate_matrix_idx}"
+            if tree is None:
+                continue
+                
+            if args.remove_progenitors:
+                leaves = tree.get_leaves()
+                to_keep = [leaf for leaf in leaves if leaf.state in terminals]
+                if len(to_keep) == 0:
+                    continue
+                tree.prune(to_keep)
 
-        os.makedirs(rate_dir, exist_ok=True)
-        simulation_info = {
-            "Q": Q,
-            "lam": lam,
-            "terminals": terminals,
-            "potency_sets": potency_sets
-        }
-        with open(f"{rate_dir}/simulation_info.pkl", "wb") as fp:
-            pickle.dump(simulation_info, fp)
-        with open(f"{rate_dir}/Q.pkl", "wb") as fp:
-            pickle.dump(Q, fp)
 
-        if matrix_idxs[i] not in init_distributions:
-            # TODO: Deprecate this
-            starting_state = len(terminals) 
-            warnings.warn(f"Automatically set starting state to be idx {starting_state}. " + \
-                           "If this was not intentional, please add an initial distribution to the rate matrix")
-        else:
-            starting_state = int(np.argmax(init_distributions[matrix_idxs[i]]))    # NOTE: Currently assuming that this is a [1, 0, ... 0] distribution
-            print("Starting state is", starting_state)
+            num_leaves = len(tree.get_leaves())
+            total_leaves += num_leaves
 
-        
-        for trial in range(args.num_trials):
-            temp_str = f"time_{args.time}"
-            output_dir = f"{rate_dir}/trees_{args.num_trees}/{temp_str}/trial_{trial}"
-            # output_dir = f"{rate_dir}/{temp_str}/trees_{args.num_trees}/trial_{trial}"
-            os.makedirs(output_dir, exist_ok=True)
-            tree_list = []
-            num_terminal = 0
-            total_leaves = 0
-            total_type_counts = Counter()
-            for j in range(args.num_trees):
-                seed = seeds[j + trial * args.num_trees + i * args.num_trees * trial]
+            node_state_counter = Counter()
+            leaf_state_counter = Counter()
+            terminal_state_nodes = []
+            for node in tree.traverse():
+                node_state_counter[node.state] += 1
+                if node.is_leaf():
+                    leaf_state_counter[node.state] += 1
+                    total_type_counts[node.state] += 1
+                if node.is_leaf() and node.state in terminals:
+                    terminal_state_nodes.append(node)
+            num_terminal += len(terminal_state_nodes)
+            tree_list.append(tree)
 
-                tree = simulate_tree(Q,
-                                     lam,
-                                     starting_state,
-                                     T=args.time,
-                                     seed=seed)
+        out_filename = "trees"
+        with open(f"{output_dir}/{out_filename}.pkl", "wb") as fp:
+            pickle.dump(tree_list, fp)
 
-                num_leaves = len(tree.get_leaves())
-                total_leaves += num_leaves
+        clone_size = []
+        clone_depth = []
+        leaf_composition = Counter()
+        for tree in tree_list:
+            clone_size.append(len(tree.get_leaves()))
+            clone_depth.append(tree.get_farthest_leaf(topology_only=True)[1])
 
-                node_state_counter = Counter()
-                leaf_state_counter = Counter()
-                terminal_state_nodes = []
-                for node in tree.traverse():
-                    node_state_counter[node.state] += 1
-                    if node.is_leaf():
-                        leaf_state_counter[node.state] += 1
-                        total_type_counts[node.state] += 1
-                    if node.is_leaf() and node.state in terminals:
-                        terminal_state_nodes.append(node)
-                num_terminal += len(terminal_state_nodes)
-                tree_list.append(tree)
+            leaf_states = list(set([leaf.state for leaf in tree.get_leaves()]))
+            leaf_states.sort()
+            leaf_types = tuple(leaf_states)
+            leaf_composition[leaf_types] += 1
 
-            out_filename = "trees"
-            with open(f"{output_dir}/{out_filename}.pkl", "wb") as fp:
-                pickle.dump(tree_list, fp)
-
-            clone_size = []
-            clone_depth = []
-            for tree in tree_list:
-                clone_size.append(len(tree.get_leaves()))
-                clone_depth.append(tree.get_farthest_leaf(topology_only=True)[1])
-
-            # Print out clone stats
-            print()
-            print(f"{trial} Clone stats:")
-            print(f"\tprop terminal:  {num_terminal / total_leaves}")
-            print(f"\tavg size:       {sum(clone_size) / len(clone_size)}")
-            print(f"\tmax size:       {max(clone_size)}")
-            print(f"\tavg depth:      {sum(clone_depth) / len(clone_depth)}")
-            print(f"\tmax depth:      {max(clone_depth)}")
-            print(f"\ttype counts:    {OrderedDict(total_type_counts)}")
-            print()
+        # Print out clone stats
+        print()
+        print(f"{trial} Clone stats:")
+        print(f"\tprop terminal:  {num_terminal / total_leaves}")
+        print(f"\tavg size:       {sum(clone_size) / len(clone_size)}")
+        print(f"\tmax size:       {max(clone_size)}")
+        print(f"\tavg depth:      {sum(clone_depth) / len(clone_depth)}")
+        print(f"\tmax depth:      {max(clone_depth)}")
+        print(f"\ttype counts:    {OrderedDict(total_type_counts)}")
+        print(f"\ttype comp:      {leaf_composition}")
+        print()
 
 
 
