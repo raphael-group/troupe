@@ -11,6 +11,8 @@ from models import BaseLikelihoodModel, dtype, EPS, INF, INF_SM
 
 import torchode as ode
 
+from classe_vector_transport import ClaSSEVectorTransportCache
+
 logger = logging.getLogger(__name__)
 
 
@@ -150,6 +152,7 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
         ode_method: str = "Dopri5",
         ode_atol: float = 1e-8,
         ode_rtol: float = 1e-6,
+        backend: str = "fundamental",
     ):
         super().__init__(trees, num_states, device)
         self.num_hidden = num_hidden
@@ -161,6 +164,9 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
         self.ode_method = str(ode_method)
         self.ode_atol = float(ode_atol)
         self.ode_rtol = float(ode_rtol)
+        self.backend = str(backend)
+        if self.backend not in {"fundamental", "vector_transport"}:
+            raise ValueError(f"Unknown ClaSSE backend '{self.backend}'")
         self._ode_cache = None
 
         self.kernel_builder = DaughterKernelBuilder(
@@ -506,31 +512,33 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
 
         time_grid = self._global_time_grid
         E_vals = self._solve_e_torchode(time_grid, B, lam, eta)
-        fundamental = self._compute_fundamental_piecewise(time_grid, E_vals, B, lam)
 
-        # Invert the fundamental matrix for all time points in one batched call.
-        fundamental_inv = torch.linalg.inv(fundamental)  # (T, K, K)
-
-        # Batch-compute Phi(t_parent, t_child) = Y(t_parent) @ Y(t_child)^{-1}
-        # for all pairs in a single bmm, then take log.
-        if self._pair_child_time_idxs.numel() > 0:
-            log_props = torch.log(
-                torch.bmm(
-                    fundamental[self._pair_parent_time_idxs],
-                    fundamental_inv[self._pair_child_time_idxs],
-                ).clamp_min(EPS)
-            )  # (N_pairs, K, K)
-        else:
-            log_props = torch.empty(
-                0, self.num_states, self.num_states, device=self.device, dtype=dtype
-            )
-
-        self._ode_cache = {
+        ode_cache = {
             "log_B": log_B,
             "log_lam": log_lam,
             "log_eta": log_eta,
-            "log_props": log_props,
         }
+
+        if self.backend == "fundamental":
+            fundamental = self._compute_fundamental_piecewise(time_grid, E_vals, B, lam)
+            fundamental_inv = torch.linalg.inv(fundamental)  # (T, K, K)
+
+            if self._pair_child_time_idxs.numel() > 0:
+                log_props = torch.log(
+                    torch.bmm(
+                        fundamental[self._pair_parent_time_idxs],
+                        fundamental_inv[self._pair_child_time_idxs],
+                    ).clamp_min(EPS)
+                )  # (N_pairs, K, K)
+            else:
+                log_props = torch.empty(
+                    0, self.num_states, self.num_states, device=self.device, dtype=dtype
+                )
+            ode_cache["log_props"] = log_props
+        else:
+            ode_cache["transport_cache"] = ClaSSEVectorTransportCache(time_grid, E_vals, B, lam)
+
+        self._ode_cache = ode_cache
 
     def clear_ode_cache(self) -> None:
         """Release the cached ODE solution."""
@@ -548,11 +556,14 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
             log_B = self._ode_cache["log_B"]
             log_lam = self._ode_cache["log_lam"]
             log_eta = self._ode_cache["log_eta"]
-            log_props = self._ode_cache["log_props"]
-            pair_ids = tree_metadata["pair_ids"]
+            if self.backend == "fundamental":
+                log_props = self._ode_cache["log_props"]
+                pair_ids = tree_metadata["pair_ids"]
 
-            def _get_log_P(node_idx: int, child_slot: int) -> Tensor:
-                return log_props[pair_ids[node_idx, child_slot]]
+                def _get_log_P(node_idx: int, child_slot: int) -> Tensor:
+                    return log_props[pair_ids[node_idx, child_slot]]
+            else:
+                transport_cache = self._ode_cache["transport_cache"]
         else:
             B = self.get_daughter_kernel()
             log_B = torch.log(B.clamp_min(EPS))
@@ -575,7 +586,7 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
         leaf_mask = tree_metadata["leaf_mask"]
         log_partials[leaf_mask] = init_p[leaf_mask] + log_eta
 
-        if self._ode_cache is not None:
+        if self._ode_cache is not None and self.backend == "fundamental":
             for level_batch in tree_metadata["level_batches"]:
                 node_idxs = level_batch["node_idxs"]
                 child_idxs = level_batch["child_idxs"]
@@ -598,6 +609,48 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
                     )
                     right_mix = torch.logsumexp(
                         log_B.unsqueeze(0) + right_child_logs.unsqueeze(1),
+                        dim=2,
+                    )
+                    node_values[valid] = log_two + log_lam + left_mix + right_mix
+
+                log_partials[node_idxs] = node_values
+        elif self._ode_cache is not None and self.backend == "vector_transport":
+            for level_batch in tree_metadata["level_batches"]:
+                node_idxs = level_batch["node_idxs"]
+                child_idxs = level_batch["child_idxs"]
+                pair_ids = level_batch["pair_ids"]
+
+                left_idxs = child_idxs[:, 0]
+                left_pair_ids = pair_ids[:, 0]
+                left_child_logs = log_partials[left_idxs]
+                left_child_times = self._pair_child_time_idxs[left_pair_ids]
+                left_parent_times = self._pair_parent_time_idxs[left_pair_ids]
+                left_propagated = transport_cache.propagate_log_batch(
+                    left_child_logs,
+                    left_child_times,
+                    left_parent_times,
+                )
+                node_values = left_propagated.clone()
+
+                right_mask = child_idxs[:, 1] >= 0
+                if right_mask.any():
+                    valid = right_mask.nonzero(as_tuple=True)[0]
+                    right_idxs = child_idxs[valid, 1]
+                    right_pair_ids = pair_ids[valid, 1]
+                    right_child_logs = log_partials[right_idxs]
+                    right_child_times = self._pair_child_time_idxs[right_pair_ids]
+                    right_parent_times = self._pair_parent_time_idxs[right_pair_ids]
+                    right_propagated = transport_cache.propagate_log_batch(
+                        right_child_logs,
+                        right_child_times,
+                        right_parent_times,
+                    )
+                    left_mix = torch.logsumexp(
+                        log_B.unsqueeze(0) + left_propagated[valid].unsqueeze(1),
+                        dim=2,
+                    )
+                    right_mix = torch.logsumexp(
+                        log_B.unsqueeze(0) + right_propagated.unsqueeze(1),
                         dim=2,
                     )
                     node_values[valid] = log_two + log_lam + left_mix + right_mix

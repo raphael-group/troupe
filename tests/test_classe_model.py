@@ -38,7 +38,7 @@ def _make_trees(B_np, lam_np, num_trees=3, T=1.0, starting_type=0, sample_probab
     return trees
 
 
-def _make_two_state_model(device=None, B_logits=None, eta=1.0, start_state=None):
+def _make_two_state_model(device=None, B_logits=None, eta=1.0, start_state=None, backend="fundamental"):
     """Minimal 2-state ClaSSELikelihoodModel for testing."""
     device = device or torch.device("cpu")
     # State 0 produces type-0 or type-1 daughters equally; state 1 is terminal.
@@ -63,6 +63,7 @@ def _make_two_state_model(device=None, B_logits=None, eta=1.0, start_state=None)
         device=device,
         start_state=start_state,
         sampling_prob=eta_logit,
+        backend=backend,
     )
     return model, trees
 
@@ -212,6 +213,31 @@ class TestClaSSELikelihoodModelBasic:
         cached = model(0)
         model.clear_ode_cache()
         assert torch.allclose(cached, uncached, atol=1e-8)
+
+    def test_vector_transport_backend_matches_fundamental_backend(self):
+        """The vector-transport backend should agree with the fundamental backend."""
+        model_fundamental, trees = _make_two_state_model()
+        model_vector = ClaSSELikelihoodModel(
+            trees=trees,
+            num_states=2,
+            birth_kernel_params=model_fundamental.kernel_builder._full_logits().detach(),
+            pi_params=model_fundamental.pi_params.detach().clone(),
+            growth_params=model_fundamental.growth_params.detach().clone(),
+            idx2potency=model_fundamental.idx2potency,
+            idx2state=model_fundamental.idx2state,
+            device=model_fundamental.device,
+            start_state=None,
+            sampling_prob=float(model_fundamental.get_sampling_probability().item()),
+            backend="vector_transport",
+        )
+        model_fundamental.precompute_ode()
+        model_vector.precompute_ode()
+        for tree_idx in range(len(trees)):
+            ll_f = model_fundamental(tree_idx)
+            ll_v = model_vector(tree_idx)
+            assert torch.allclose(ll_v, ll_f, atol=1e-4)
+        model_fundamental.clear_ode_cache()
+        model_vector.clear_ode_cache()
 
     def test_start_state_fixes_root_distribution(self):
         """When start_state is set, >99% of root mass should be on that state."""

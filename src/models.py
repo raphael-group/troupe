@@ -185,7 +185,7 @@ class TreeTensorizer:
         """
         tree = tree.copy("deepcopy")
         if len(tree.children) != 1:
-            warnings.warn("We require a unifurcating root with branch length 0. Adding one now.")
+            # warnings.warn("We require a unifurcating root with branch length 0. Adding one now.")
             root = TreeNode()
             root.dist = 0
             root.add_child(tree)
