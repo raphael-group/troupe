@@ -13,11 +13,10 @@ birth kernel B.
 
 Example usage:
     python scripts/run_classe_troupe.py \
-        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves/trees_64/time_5.0/sample_0.4/trial_0/trees.pkl \
-        -o tmp/classe_results \
-        --regularizations 1.0 \
-        --sampling_probability 0.4 \
-        --skip_phase_1
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves_4_terminals/trees_64/time_5.0/sample_0.1/trial_0/trees.pkl \
+        -o tmp/classe_results_4_terminals \
+        --regularizations 0.01 0.1 1.0 \
+        --sampling_probability 0.1
 """
 
 import argparse

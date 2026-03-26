@@ -89,6 +89,7 @@ def main():
         num_terminal = 0
         total_leaves = 0
         total_type_counts = Counter()
+        num_progenitors_removed = []
         for j in range(args.num_trees):
             seed = seeds[j + trial * args.num_trees]
 
@@ -108,6 +109,8 @@ def main():
                 if len(to_keep) == 0:
                     continue
                 tree.prune(to_keep)
+                num_pruned = len(leaves) - len(to_keep)
+                num_progenitors_removed.append(num_pruned)
 
 
             num_leaves = len(tree.get_leaves())
@@ -152,6 +155,7 @@ def main():
         print(f"\tmax depth:      {max(clone_depth)}")
         print(f"\ttype counts:    {OrderedDict(total_type_counts)}")
         print(f"\ttype comp:      {leaf_composition}")
+        print(f"\tremoved prog:   {sum(num_progenitors_removed) / len(num_progenitors_removed)} per tree")
         print()
 
 

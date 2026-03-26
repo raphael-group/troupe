@@ -352,6 +352,27 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
             self._pair_parent_time_idxs = torch.empty(0, dtype=torch.long, device=self.device)
 
         self._tree_time_metadata = tree_metadata
+        for tree_metadata in self._tree_time_metadata:
+            for level_batch in tree_metadata["level_batches"]:
+                child_idxs = level_batch["child_idxs"]
+                pair_ids = level_batch["pair_ids"]
+                left_count = child_idxs.shape[0]
+                right_mask = child_idxs[:, 1] >= 0
+                level_batch["left_child_idxs"] = child_idxs[:, 0]
+                level_batch["left_child_time_idxs"] = self._pair_child_time_idxs[pair_ids[:, 0]]
+                level_batch["left_parent_time_idxs"] = self._pair_parent_time_idxs[pair_ids[:, 0]]
+                level_batch["right_mask"] = right_mask
+                level_batch["right_positions"] = right_mask.nonzero(as_tuple=True)[0]
+                if right_mask.any():
+                    right_pair_ids = pair_ids[right_mask, 1]
+                    level_batch["right_child_idxs"] = child_idxs[right_mask, 1]
+                    level_batch["right_child_time_idxs"] = self._pair_child_time_idxs[right_pair_ids]
+                    level_batch["right_parent_time_idxs"] = self._pair_parent_time_idxs[right_pair_ids]
+                else:
+                    level_batch["right_child_idxs"] = torch.empty(0, dtype=torch.long, device=self.device)
+                    level_batch["right_child_time_idxs"] = torch.empty(0, dtype=torch.long, device=self.device)
+                    level_batch["right_parent_time_idxs"] = torch.empty(0, dtype=torch.long, device=self.device)
+                level_batch["left_count"] = left_count
 
     def _e_rhs(self, E_vec: Tensor, B: Tensor, lam: Tensor) -> Tensor:
         q = B @ E_vec
@@ -617,34 +638,30 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
         elif self._ode_cache is not None and self.backend == "vector_transport":
             for level_batch in tree_metadata["level_batches"]:
                 node_idxs = level_batch["node_idxs"]
-                child_idxs = level_batch["child_idxs"]
-                pair_ids = level_batch["pair_ids"]
+                left_child_logs = log_partials[level_batch["left_child_idxs"]]
+                right_child_logs = log_partials[level_batch["right_child_idxs"]]
 
-                left_idxs = child_idxs[:, 0]
-                left_pair_ids = pair_ids[:, 0]
-                left_child_logs = log_partials[left_idxs]
-                left_child_times = self._pair_child_time_idxs[left_pair_ids]
-                left_parent_times = self._pair_parent_time_idxs[left_pair_ids]
-                left_propagated = transport_cache.propagate_log_batch(
-                    left_child_logs,
-                    left_child_times,
-                    left_parent_times,
+                batched_child_logs = torch.cat((left_child_logs, right_child_logs), dim=0)
+                batched_child_times = torch.cat(
+                    (level_batch["left_child_time_idxs"], level_batch["right_child_time_idxs"]),
+                    dim=0,
                 )
+                batched_parent_times = torch.cat(
+                    (level_batch["left_parent_time_idxs"], level_batch["right_parent_time_idxs"]),
+                    dim=0,
+                )
+                propagated = transport_cache.propagate_log_batch(
+                    batched_child_logs,
+                    batched_child_times,
+                    batched_parent_times,
+                )
+                left_count = level_batch["left_count"]
+                left_propagated = propagated[:left_count]
                 node_values = left_propagated.clone()
 
-                right_mask = child_idxs[:, 1] >= 0
-                if right_mask.any():
-                    valid = right_mask.nonzero(as_tuple=True)[0]
-                    right_idxs = child_idxs[valid, 1]
-                    right_pair_ids = pair_ids[valid, 1]
-                    right_child_logs = log_partials[right_idxs]
-                    right_child_times = self._pair_child_time_idxs[right_pair_ids]
-                    right_parent_times = self._pair_parent_time_idxs[right_pair_ids]
-                    right_propagated = transport_cache.propagate_log_batch(
-                        right_child_logs,
-                        right_child_times,
-                        right_parent_times,
-                    )
+                if level_batch["right_positions"].numel() > 0:
+                    valid = level_batch["right_positions"]
+                    right_propagated = propagated[left_count:]
                     left_mix = torch.logsumexp(
                         log_B.unsqueeze(0) + left_propagated[valid].unsqueeze(1),
                         dim=2,

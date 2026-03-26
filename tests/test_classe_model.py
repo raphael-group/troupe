@@ -67,6 +67,34 @@ def _make_two_state_model(device=None, B_logits=None, eta=1.0, start_state=None,
     )
     return model, trees
 
+def _make_three_state_model(device=None, B_logits=None, eta=1.0, start_state=None, backend="fundamental"):
+    """Minimal 3-state ClaSSELikelihoodModel for testing."""
+    device = device or torch.device("cpu")
+    B_np = np.array([[0.5, 0.25, 0.25], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    lam_np = np.array([1.5, 1.0, 1.0])
+    trees = _make_trees(B_np, lam_np, num_trees=3)
+    idx2potency = {0: (0, 1, 2), 1: (1,), 2: (2,)}
+    idx2state = {0: 0, 1: 1, 2: 2}
+    if B_logits is None:
+        B_logits = torch.zeros(3, 3, dtype=dtype)
+    growth_params = _make_growth_params(lam_np, device=device)
+    pi_params = torch.zeros(3, dtype=dtype, device=device)
+    eta_logit = eta
+    model = ClaSSELikelihoodModel(
+        trees=trees,
+        num_states=3,
+        birth_kernel_params=B_logits.to(device),
+        pi_params=pi_params,
+        growth_params=growth_params,
+        idx2potency=idx2potency,
+        idx2state=idx2state,
+        device=device,
+        start_state=start_state,
+        sampling_prob=eta_logit,
+        backend=backend,
+    )
+    return model, trees
+
 
 # ===========================================================================
 # DaughterKernelBuilder
@@ -214,12 +242,37 @@ class TestClaSSELikelihoodModelBasic:
         model.clear_ode_cache()
         assert torch.allclose(cached, uncached, atol=1e-8)
 
-    def test_vector_transport_backend_matches_fundamental_backend(self):
+    def test_vector_transport_backend_matches_fundamental_backend_two_state(self):
         """The vector-transport backend should agree with the fundamental backend."""
         model_fundamental, trees = _make_two_state_model()
         model_vector = ClaSSELikelihoodModel(
             trees=trees,
             num_states=2,
+            birth_kernel_params=model_fundamental.kernel_builder._full_logits().detach(),
+            pi_params=model_fundamental.pi_params.detach().clone(),
+            growth_params=model_fundamental.growth_params.detach().clone(),
+            idx2potency=model_fundamental.idx2potency,
+            idx2state=model_fundamental.idx2state,
+            device=model_fundamental.device,
+            start_state=None,
+            sampling_prob=float(model_fundamental.get_sampling_probability().item()),
+            backend="vector_transport",
+        )
+        model_fundamental.precompute_ode()
+        model_vector.precompute_ode()
+        for tree_idx in range(len(trees)):
+            ll_f = model_fundamental(tree_idx)
+            ll_v = model_vector(tree_idx)
+            assert torch.allclose(ll_v, ll_f, atol=1e-4)
+        model_fundamental.clear_ode_cache()
+        model_vector.clear_ode_cache()
+
+    def test_vector_transport_backend_matches_fundamental_backend_three_state(self):
+        """The vector-transport backend should agree with the fundamental backend."""
+        model_fundamental, trees = _make_three_state_model()
+        model_vector = ClaSSELikelihoodModel(
+            trees=trees,
+            num_states=3,
             birth_kernel_params=model_fundamental.kernel_builder._full_logits().detach(),
             pi_params=model_fundamental.pi_params.detach().clone(),
             growth_params=model_fundamental.growth_params.detach().clone(),

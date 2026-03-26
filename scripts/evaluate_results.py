@@ -1688,7 +1688,7 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
     Usage example:
         BASE_DIR=/Users/william_hs/Desktop/Projects/troupe;
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i $BASE_DIR/example/results
+            -i $BASE_DIR/tmp/classe_results
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)
@@ -1719,7 +1719,12 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
         with open(model_dict_path, 'rb') as fp:
             model_dict = pickle.load(fp)
 
-        rate_matrix = model_dict['rate_matrix'].detach().numpy()
+        if "daughter_kernel" in model_dict:
+            rate_matrix = model_dict['daughter_kernel'].detach().numpy()
+            mask = np.eye(len(rate_matrix), dtype=bool)
+            rate_matrix[mask] = 0
+        else:
+            rate_matrix = model_dict['rate_matrix'].detach().numpy()
         root_distribution = model_dict['root_distribution']
         growth_rates = model_dict['growth_rates'].detach().numpy()
         idx2state = model_dict['idx2state']

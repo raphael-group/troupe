@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 from torch import Tensor
 
@@ -31,30 +29,6 @@ class ClaSSEVectorTransportCache:
         k4 = self._rhs(V + dt * k3, interval_idx)
         return V + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
-    def _propagate_same_range(self, child_logs: Tensor, child_time_idx: int, parent_time_idx: int) -> Tensor:
-        if child_time_idx == parent_time_idx:
-            return child_logs
-        if child_time_idx > parent_time_idx:
-            raise ValueError("child_time_idx must be <= parent_time_idx")
-
-        out = torch.full_like(child_logs, float("-inf"))
-        finite_mask = torch.isfinite(child_logs).any(dim=1)
-        if not finite_mask.any():
-            return out
-
-        work_logs = child_logs[finite_mask]
-        log_scales = work_logs.max(dim=1).values
-        V = torch.exp(work_logs - log_scales.unsqueeze(1)).transpose(0, 1)
-
-        for interval_idx in range(child_time_idx, parent_time_idx):
-            V = self._rk4_step(V, interval_idx).clamp_min(EPS)
-            col_scales = V.max(dim=0).values.clamp_min(EPS)
-            V = V / col_scales.unsqueeze(0)
-            log_scales = log_scales + torch.log(col_scales)
-
-        out[finite_mask] = torch.log(V.transpose(0, 1).clamp_min(EPS)) + log_scales.unsqueeze(1)
-        return out
-
     def propagate_log_batch(
         self,
         child_logs: Tensor,
@@ -63,19 +37,36 @@ class ClaSSEVectorTransportCache:
     ) -> Tensor:
         if child_logs.numel() == 0:
             return child_logs
+        if child_logs.shape[0] != child_time_idxs.shape[0] or child_logs.shape[0] != parent_time_idxs.shape[0]:
+            raise ValueError("child_logs, child_time_idxs, and parent_time_idxs must agree in batch size")
+        if (child_time_idxs > parent_time_idxs).any():
+            raise ValueError("child_time_idxs must be <= parent_time_idxs")
 
-        pair_tensor = torch.stack((child_time_idxs, parent_time_idxs), dim=1)
-        unique_pairs, inverse = torch.unique(pair_tensor, dim=0, return_inverse=True)
-        propagated = torch.empty_like(child_logs, dtype=dtype)
+        out = torch.full_like(child_logs, float("-inf"))
+        finite_mask = torch.isfinite(child_logs).any(dim=1)
+        if not finite_mask.any():
+            return out
 
-        for group_idx in range(unique_pairs.shape[0]):
-            mask = inverse == group_idx
-            child_time_idx = int(unique_pairs[group_idx, 0].item())
-            parent_time_idx = int(unique_pairs[group_idx, 1].item())
-            propagated[mask] = self._propagate_same_range(
-                child_logs[mask],
-                child_time_idx,
-                parent_time_idx,
-            )
+        work_logs = child_logs[finite_mask]
+        work_child_times = child_time_idxs[finite_mask]
+        work_parent_times = parent_time_idxs[finite_mask]
 
-        return propagated
+        log_scales = work_logs.max(dim=1).values
+        V = torch.exp(work_logs - log_scales.unsqueeze(1)).transpose(0, 1)
+
+        min_start = int(work_child_times.min().item())
+        max_end = int(work_parent_times.max().item())
+
+        for interval_idx in range(min_start, max_end):
+            active_cols = ((work_child_times <= interval_idx) & (interval_idx < work_parent_times)).nonzero(as_tuple=True)[0]
+            if active_cols.numel() == 0:
+                continue
+
+            V_active = self._rk4_step(V.index_select(1, active_cols), interval_idx).clamp_min(EPS)
+            col_scales = V_active.max(dim=0).values.clamp_min(EPS)
+            V_active = V_active / col_scales.unsqueeze(0)
+            V[:, active_cols] = V_active
+            log_scales[active_cols] = log_scales[active_cols] + torch.log(col_scales)
+
+        out[finite_mask] = torch.log(V.transpose(0, 1).clamp_min(EPS)) + log_scales.unsqueeze(1)
+        return out
