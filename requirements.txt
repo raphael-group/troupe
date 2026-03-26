@@ -1,5 +1,6 @@
 # Core
 torch>=2.0
+torchode
 numpy>=1.24
 scipy>=1.10
 ete3>=3.1.3
