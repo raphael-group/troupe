@@ -18,7 +18,8 @@ def draw_weighted_graph(adj_matrix,
                         state2potency=None,     # int -> Iterable[int] (terminals)
                         self_edges=None,
                         no_node_labels=False,
-                        terminal_idxs=None):
+                        terminal_idxs=None,
+                        scale_by_transitions=False):
     """
     Inputs
         adj_matrix:         Numpy adjacency matrix.
@@ -93,6 +94,8 @@ def draw_weighted_graph(adj_matrix,
         terminals = terminal_idxs
 
     max_w = max([w for _, _, w in edges], default=1.0)
+    max_transition = max([w for u, v, w in edges if u != v])
+    max_growth = max([w for u, v, w in edges if u == v])
 
     # DAG detection
     dag_levels = _dag_levels(nodes, edges)  # returns dict node->level or None if cyclic
@@ -158,6 +161,11 @@ def draw_weighted_graph(adj_matrix,
 
     # Edges with scaled widths/labels
     for u, v, w in edges:
+        if scale_by_transitions:
+            if u == v:
+                max_w = max_growth
+            else:
+                max_w = max_transition
         pen = max(7.0 * (w / max_w), 1.0)
         arr = max(0.3, 0.1 * pen)
         attrs = {'penwidth': f'{pen:.3g}', 'arrowsize': f'{arr:.3g}'}

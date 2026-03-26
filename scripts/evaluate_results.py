@@ -1778,6 +1778,7 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
             self_edges=growth_rates,
             state2potency=state2potency_filtered,
             terminal_idxs=terminal_idxs if terminal_idxs else None,
+            scale_by_transitions="daughter_kernel" in model_dict
         )
         click.echo(f"  {reg_dir_name}/{suffix} -> {outfile}")
 
