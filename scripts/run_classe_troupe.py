@@ -13,10 +13,23 @@ birth kernel B.
 
 Example usage:
     python scripts/run_classe_troupe.py \
-        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves_4_terminals/trees_64/time_5.0/sample_0.1/trial_0/trees.pkl \
-        -o tmp/classe_results_4_terminals \
-        --regularizations 0.01 0.1 1.0 \
-        --sampling_probability 0.1
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/c_elegans/packer/benchmark_processed/sample_0.5/trial_0/trees.pkl \
+        -o tmp/c_elegans_subsample \
+        --regularizations 0.5 0.7 0.9 1.1 1.3 2.1 2.3 \
+        --sampling_probability 0.37
+    
+    python scripts/run_classe_troupe.py \
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/c_elegans/packer/benchmark_processed/sample_0.5/trial_0/trees.pkl \
+        -o tmp/c_elegans_subsample \
+        --regularizations 0.0001 0.0003 0.001 0.003 0.01 0.03 0.1 0.3 0.5 0.7 0.9 1 1.1 1.3 2.1 2.3 3 10 30 100 \
+        --sampling_probability 0.37 \
+        --model_selection_only
+
+    python scripts/run_classe_troupe.py \
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/c_elegans/packer/context_aware_coarse_graining/benchmark_processed/sample_0.4/trial_0/trees.pkl \
+        -o tmp/c_elegans_subsample \
+        --regularizations 100 10 1 0.1 0.01 0.001 \
+        --sampling_probability 0.3
 """
 
 import argparse
@@ -29,12 +42,15 @@ import sys
 import time
 from collections import Counter
 
+import matplotlib
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from ete3 import Tree, TreeNode
 from kneed import KneeLocator
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from classe_model import ClaSSELikelihoodModel
 from optimizer import constant_rate_mle
@@ -79,6 +95,36 @@ def _uniform_kernel_logits(idx2potency, n_states, device):
     return logits
 
 
+def _birth_kernel_regularization(B, regularization_type="l1", support_mask=None):
+    """Penalty on off-diagonal entries of a row-stochastic daughter kernel.
+
+    ``l1`` penalizes entries independently.
+    ``column_group_lasso`` penalizes destination columns jointly via an L2 norm
+    over off-diagonal incoming mass, weighted by sqrt(group_size) to account
+    for varying support sizes under potency constraints.
+    """
+    offdiag_mask = ~torch.eye(B.shape[0], dtype=torch.bool, device=B.device)
+    offdiag_B = torch.where(offdiag_mask, B, torch.zeros_like(B))
+
+    if regularization_type == "l1":
+        return torch.sum(torch.abs(offdiag_B))
+
+    if regularization_type == "column_group_lasso":
+        col_norms = torch.linalg.vector_norm(offdiag_B, ord=2, dim=0)
+        if support_mask is None:
+            return torch.sum(col_norms)
+
+        allowed_mask = support_mask.to(dtype=torch.bool, device=B.device) & offdiag_mask
+        group_sizes = allowed_mask.sum(dim=0).to(dtype=B.dtype)
+        weights = torch.sqrt(group_sizes.clamp_min(1.0))
+        return torch.sum(weights * col_norms)
+
+    raise ValueError(
+        f"Unknown regularization_type '{regularization_type}'. "
+        "Expected one of {'l1', 'column_group_lasso'}."
+    )
+
+
 def _get_idx2potency_classe(B_np, eps=1e-4, n_steps=100):
     """Infer potency sets from a row-stochastic birth kernel via matrix power.
 
@@ -101,6 +147,172 @@ def _get_idx2potency_classe(B_np, eps=1e-4, n_steps=100):
     return potency_map
 
 
+def _infer_support_graph_potencies_classe(
+    B_np,
+    idx2state,
+    observed_potencies,
+    abs_eps=1e-8,
+    rel_eps=1e-3,
+    top_k=2,
+):
+    """Infer potencies from support reachability rather than matrix powers.
+
+    Observed states are treated as anchors with fixed potencies from
+    ``observed_potencies``. Hidden-state potencies are the union of anchor
+    potencies reachable through a support graph derived from the direct
+    daughter-kernel edges.
+    """
+    n = len(B_np)
+    state2idx = {state: idx for idx, state in idx2state.items()}
+    normalized_observed_potencies = {
+        state: tuple(sorted(potency)) for state, potency in observed_potencies.items()
+    }
+
+    support = np.zeros((n, n), dtype=bool)
+    for i in range(n):
+        row = np.asarray(B_np[i], dtype=float)
+        positive_mask = row > 0.0
+        support[i] |= row > abs_eps
+
+        row_max = float(row.max()) if row.size > 0 else 0.0
+        if row_max > 0.0:
+            support[i] |= row >= (rel_eps * row_max)
+
+        if top_k is not None and top_k > 0 and positive_mask.any():
+            positive_idxs = np.flatnonzero(positive_mask)
+            k = min(int(top_k), len(positive_idxs))
+            top_order = positive_idxs[np.argsort(row[positive_idxs])[-k:]]
+            support[i, top_order] = True
+
+    # Rare observed states can have tiny incoming mass that should still count
+    # for potency inference even if it falls below the support threshold.
+    forced_support_edges = []
+    for state in sorted(normalized_observed_potencies):
+        if state not in state2idx:
+            continue
+        target_idx = state2idx[state]
+        incoming_selected = any(support[src, target_idx] for src in range(n) if src != target_idx)
+        if incoming_selected:
+            continue
+
+        incoming_weights = np.asarray(B_np[:, target_idx], dtype=float).copy()
+        incoming_weights[target_idx] = 0.0
+        best_source = int(np.argmax(incoming_weights))
+        best_weight = float(incoming_weights[best_source])
+        if best_weight > 0.0:
+            support[best_source, target_idx] = True
+            forced_support_edges.append((best_source, target_idx, best_weight))
+
+    neighbors = [np.flatnonzero(support[i]).tolist() for i in range(n)]
+    potency_map = {}
+    for start_idx in range(n):
+        visited = {start_idx}
+        stack = [start_idx]
+        while stack:
+            src = stack.pop()
+            for dst in neighbors[src]:
+                if dst not in visited:
+                    visited.add(dst)
+                    stack.append(dst)
+
+        potency = set()
+        for idx in visited:
+            state = idx2state[idx]
+            if state in normalized_observed_potencies:
+                potency.update(normalized_observed_potencies[state])
+        potency_map[start_idx] = tuple(sorted(potency))
+
+    return potency_map, support, forced_support_edges
+
+
+def _build_phase2_label_maps(ordered_potencies, terminal_labels, observed_potencies):
+    """Map observed labels onto reduced Phase 2 potency classes.
+
+    Phase 2 merges states by inferred potency. That merge should preserve the
+    mapping for all observed leaf labels, including observed intermediate
+    states such as NMPs whose observed potency is not a singleton terminal.
+
+    Returns:
+        idx2potency: Reduced-state potency map.
+        newidx2state: Representative label for each reduced state.
+        state2newidx: Alias map from every observed label to a reduced-state idx.
+    """
+    terminal_set = set(terminal_labels)
+    idx2potency = {new_idx: potency for new_idx, potency in enumerate(ordered_potencies)}
+    potency_to_newidx = {potency: new_idx for new_idx, potency in idx2potency.items()}
+
+    normalized_observed_potencies = {
+        state: tuple(sorted(potency)) for state, potency in observed_potencies.items()
+    }
+    potency_to_observed_states = {}
+    for state, potency in normalized_observed_potencies.items():
+        potency_to_observed_states.setdefault(potency, []).append(state)
+
+    newidx2state = {}
+    for new_idx, potency in idx2potency.items():
+        observed_states = sorted(potency_to_observed_states.get(potency, []))
+        if len(potency) == 1 and potency[0] in terminal_set:
+            newidx2state[new_idx] = potency[0]
+        elif len(observed_states) == 1:
+            newidx2state[new_idx] = observed_states[0]
+        else:
+            newidx2state[new_idx] = f"U{new_idx}"
+
+    state2newidx = {}
+    for state, potency in normalized_observed_potencies.items():
+        if potency in potency_to_newidx:
+            state2newidx[state] = potency_to_newidx[potency]
+    for new_idx, state in newidx2state.items():
+        state2newidx.setdefault(state, new_idx)
+
+    return idx2potency, newidx2state, state2newidx
+
+
+def _collect_phase2_kept_states(
+    trees,
+    idx2state,
+    reachable_idxs,
+    inferred_idx2potency,
+    terminal_labels,
+    observed_potencies,
+):
+    """Keep all observed states present in the trees, plus reachable hidden states.
+
+    Observed labels in the data should never be dropped just because the Phase 1
+    fit assigns them tiny reachability. For those states, use the declared
+    observed potency rather than the inferred B^n potency.
+    """
+    observed_labels_in_trees = {leaf.state for tree in trees for leaf in tree.get_leaves()}
+    state2oldidx = {state: idx for idx, state in idx2state.items()}
+
+    mandatory_old_idxs = sorted(
+        state2oldidx[state]
+        for state in observed_labels_in_trees
+        if state in observed_potencies and state in state2oldidx
+    )
+    mandatory_old_idx_set = set(mandatory_old_idxs)
+
+    candidate_idxs = sorted(set(reachable_idxs) | mandatory_old_idx_set)
+    old_idx2potency = {}
+    for idx in candidate_idxs:
+        state = idx2state[idx]
+        if state in observed_potencies:
+            old_idx2potency[idx] = tuple(sorted(observed_potencies[state]))
+        else:
+            old_idx2potency[idx] = tuple(sorted(inferred_idx2potency[idx]))
+
+    kept_old_idxs = [
+        idx for idx in candidate_idxs
+        if idx in mandatory_old_idx_set or len(old_idx2potency[idx]) > 0
+    ]
+    dropped_old_idxs = sorted(
+        idx for idx in candidate_idxs
+        if idx not in mandatory_old_idx_set and len(old_idx2potency[idx]) == 0
+    )
+
+    return kept_old_idxs, dropped_old_idxs, old_idx2potency, mandatory_old_idxs
+
+
 def _compute_classe_mle(
     trees_labeled,
     n_states,
@@ -109,8 +321,9 @@ def _compute_classe_mle(
     model_info,
     sampling_prob,
     l1_reg=0.0,
+    regularization_type="l1",
     do_logging=True,
-    num_iter=50,
+    num_iter=100,
     log_iter=1,
 ):
     """Fit a ClaSSELikelihoodModel via LBFGS and save results.
@@ -123,7 +336,8 @@ def _compute_classe_mle(
         model_info: Dict with idx2potency, idx2state, start_state,
             optimize_growth, and optional B_params_init / growth_params_init.
         sampling_prob: Leaf sampling probability eta in (0, 1].
-        l1_reg: L1 regularization strength on off-diagonal B entries.
+        l1_reg: Regularization strength on off-diagonal B entries.
+        regularization_type: One of {"l1", "column_group_lasso"}.
         do_logging: Whether to log progress every log_iter steps.
         num_iter: Maximum number of LBFGS outer iterations.
         log_iter: Logging interval (iterations).
@@ -181,9 +395,9 @@ def _compute_classe_mle(
     changeable_params = [p for p in llh.parameters(recurse=True) if p.requires_grad]
     optimizer = optim.LBFGS(
         changeable_params,
-        lr=0.1,
+        lr=1.0,
         max_iter=1,
-        max_eval=2,
+        max_eval=20,
         line_search_fn="strong_wolfe",
     )
 
@@ -195,8 +409,12 @@ def _compute_classe_mle(
         total = sum(-llh(j) for j in tree_idxs) / len(tree_idxs)
         if l1_reg > 0:
             B = llh.get_daughter_kernel()
-            mask = ~torch.eye(n_states, dtype=torch.bool, device=device)
-            total = total + l1_reg * torch.sum(torch.abs(B[mask]))
+            support_mask = getattr(llh.kernel_builder, "support_mask", None)
+            total = total + l1_reg * _birth_kernel_regularization(
+                B,
+                regularization_type=regularization_type,
+                support_mask=support_mask,
+            )
         return total
 
     def closure():
@@ -225,7 +443,7 @@ def _compute_classe_mle(
             if torch.isnan(B).any() or torch.isnan(pi).any():
                 raise ValueError("NaN in parameters or loss")
 
-        if losses[-1] <= min(losses) and len(losses) >= 2:
+        if losses[-1] <= min(losses):
             with torch.no_grad():
                 os.makedirs(output_dir, exist_ok=True)
                 torch.save(llh.state_dict(), f"{output_dir}/state_dict.pth")
@@ -248,14 +466,19 @@ def _compute_classe_mle(
                 logger.info("Converged at iteration %d (rel_loss=%.2e)", i, rel)
                 break
 
-    # Always save final model
+    # Restore the best checkpoint seen during optimization, then re-save model_dict
+    # from that state. This avoids overwriting the best parameters with a worse
+    # final state if the last LBFGS step overshoots.
     os.makedirs(output_dir, exist_ok=True)
+    best_state_path = f"{output_dir}/state_dict.pth"
+    if os.path.isfile(best_state_path):
+        llh.load_state_dict(torch.load(best_state_path, map_location=device))
     with torch.no_grad():
-        torch.save(llh.state_dict(), f"{output_dir}/state_dict.pth")
+        torch.save(llh.state_dict(), best_state_path)
         _save_classe_model_dict(llh, model_info, sampling_prob, output_dir)
 
     with open(f"{output_dir}/loss.txt", "w") as fp:
-        fp.write(f"{losses[-1]}")
+        fp.write(f"{min(losses)}")
 
     return llh, losses[-1]
 
@@ -280,6 +503,83 @@ def _save_classe_model_dict(llh, model_info, sampling_prob, output_dir):
     with open(f"{output_dir}/model_dict.pkl", "wb") as fp:
         pickle.dump(model_dict, fp)
     logger.info("Saved model_dict to %s/model_dict.pkl", output_dir)
+
+
+def _discover_regularizations_from_output_dir(output_dir):
+    """Return sorted reg values from reg=<value> subdirectories."""
+    reg_values = []
+    if not os.path.isdir(output_dir):
+        return reg_values
+
+    for name in os.listdir(output_dir):
+        path = os.path.join(output_dir, name)
+        if not os.path.isdir(path) or not name.startswith("reg="):
+            continue
+        try:
+            reg_values.append(float(name.split("=", 1)[1]))
+        except ValueError:
+            logger.warning("Ignoring non-numeric regularization directory: %s", path)
+
+    return sorted(reg_values)
+
+
+def _write_model_selection_outputs(output_dir, selection, sampling_probability):
+    """Copy the selected model and write the standard summary file."""
+    best_src = f"{selection['best_model_dir']}/model_dict.pkl"
+    best_dst = f"{output_dir}/best_model_dict.pkl"
+    shutil.copy2(best_src, best_dst)
+    logger.info("Best model copied to %s", best_dst)
+
+    summary_path = f"{output_dir}/classe_troupe_summary.txt"
+    with open(summary_path, "w") as fp:
+        fp.write(f"best_reg\t{selection['best_reg']}\n")
+        fp.write(f"best_model_dir\t{selection['best_model_dir']}\n")
+        fp.write(f"knee_num_states\t{selection['knee_num_states']}\n")
+        fp.write(f"knee_loss\t{selection['knee_loss']}\n")
+        fp.write(f"sampling_probability\t{sampling_probability}\n")
+        fp.write(
+            f"num_regularizations_tested\t{len(selection['all_results'])}\n"
+        )
+        fp.write("\nAll results:\n")
+        fp.write("reg\tnum_states\tneg_llh\n")
+        for r in selection["all_results"]:
+            fp.write(f"{r['reg']}\t{r['num_states']}\t{r['neg_llh']}\n")
+
+    logger.info("Summary written to %s", summary_path)
+    _plot_model_selection_pareto_front(output_dir, selection)
+
+
+def _plot_model_selection_pareto_front(output_dir, selection):
+    """Plot best neg-llh by state count and mark the selected model."""
+    state2best = {}
+    for result in selection["all_results"]:
+        ns = result["num_states"]
+        if ns not in state2best or result["neg_llh"] < state2best[ns]["neg_llh"]:
+            state2best[ns] = result
+
+    x = sorted(state2best.keys())
+    y = [state2best[ns]["neg_llh"] for ns in x]
+    selected_states = selection["knee_num_states"]
+    selected_loss = selection["knee_loss"]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(x, y, marker="o", linewidth=2)
+    ax.plot(
+        [selected_states], [selected_loss],
+        marker="*", color="red", markersize=14, linestyle="None",
+        label=f"Selected: {selected_states} states",
+    )
+    ax.set_xlabel("Number of states")
+    ax.set_ylabel("Negative log-likelihood")
+    ax.set_title("Pareto Front")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    plot_path = f"{output_dir}/pareto_front.pdf"
+    fig.savefig(plot_path, dpi=400)
+    plt.close(fig)
+    logger.info("Pareto front written to %s", plot_path)
 
 
 # ---------------------------------------------------------------------------
@@ -360,17 +660,27 @@ def generate_potency_sets(trees, terminal_labels, observed_potencies, max_hidden
 
     potencies_to_add = set()
     for potency in induced_potencies:
-        if len(potency) > 1:
-            for state in potency:
-                sub = list(potency)
-                sub.remove(state)
-                potencies_to_add.add(tuple(sub))
+        # NOTE: A node cannot have a potency set that is smaller than what was observed
+        # if len(potency) > 1:
+        #     for state in potency:
+        #         sub = list(potency)
+        #         sub.remove(state)
+        #         potencies_to_add.add(tuple(sub))
         for state in terminal_labels:
             if state not in potency:
                 sup = sorted(list(potency) + [state])
                 potencies_to_add.add(tuple(sup))
 
     all_potencies = induced_potencies | potencies_to_add
+
+    # Always include the universal ancestor (potency = all terminal types).
+    # Without it the Phase 1 state space has no single root state covering every
+    # terminal type, causing build_model_info to leave start_state=None, which
+    # makes the root distribution a free parameter.  The optimizer then finds
+    # mixture solutions spread over restricted-potency states, making some
+    # terminal types unreachable from the selected root state in Phase 2.
+    all_potencies.add(tuple(sorted(terminal_labels)))
+
     potency_list = list(all_potencies)
     logger.info("Found %d total potencies (induced + complementary)", len(potency_list))
 
@@ -448,7 +758,7 @@ def build_model_info(states, terminal_labels, observed_potencies, potency_sets):
 # ---------------------------------------------------------------------------
 
 def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
-               reg, sampling_prob, output_dir, device):
+               reg, sampling_prob, output_dir, device, phase1_penalty="l1"):
     """Run Phase 1 (overparameterized) ClaSSE MLE for one regularization value.
 
     Args:
@@ -457,10 +767,11 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
         state2idx: Mapping from state labels to integer indices.
         num_obs: Number of observed states.
         num_hidden: Number of hidden states.
-        reg: L1 regularization strength.
+        reg: Regularization strength.
         sampling_prob: Leaf sampling probability eta.
         output_dir: Directory for this run's outputs.
         device: Torch device.
+        phase1_penalty: Penalty family for Phase 1.
 
     Returns:
         output_dir on success, None on failure.
@@ -476,6 +787,7 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
         _compute_classe_mle(
             trees_copy, n_states, device, output_dir,
             model_info, sampling_prob, l1_reg=reg,
+            regularization_type=phase1_penalty,
         )
         return output_dir
     except Exception as e:
@@ -488,7 +800,8 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
 # ---------------------------------------------------------------------------
 
 def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
-               is_int_state, sampling_prob, debiasing_l1, threshold, device, backend):
+               is_int_state, sampling_prob, debiasing_l1, threshold, device, backend,
+               phase2_penalty="l1"):
     """Extract potencies from Phase 1 model and run debiased Phase 2 ClaSSE MLE.
 
     Loads the Phase 1 model, finds reachable states from B, computes potencies
@@ -502,9 +815,10 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         observed_potencies: Dict mapping state -> potency tuple.
         is_int_state: Whether states are integers.
         sampling_prob: Leaf sampling probability eta.
-        debiasing_l1: L1 regularization for Phase 2.
+        debiasing_l1: Regularization strength for Phase 2.
         threshold: Reachability threshold for get_reachable_idxs.
         device: Torch device.
+        phase2_penalty: Penalty family for Phase 2.
 
     Returns:
         Phase 2 output directory on success, None on failure.
@@ -529,20 +843,42 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         logger.info("Phase 2: %d reachable states from starting idx %d",
                     len(reachable_idxs), starting_idx)
 
-        # Infer observed-terminal potencies via matrix power on B.
+        # Infer support-based observed-terminal potencies from the direct
+        # daughter-kernel support graph, but never drop observed labels that
+        # actually appear in the trees.
         terminal_set = set(terminal_labels)
-        idx2potency_ = _get_idx2potency_classe(B_np, eps=1e-4, n_steps=100)
-        old_idx2potency = {}
-        for idx in reachable_idxs:
-            potency_ = idx2potency_[idx]
-            potency = sorted(
-                [idx2state[s] for s in potency_ if idx2state[s] in terminal_set]
+        idx2potency_, _support_graph, forced_support_edges = _infer_support_graph_potencies_classe(
+            B_np,
+            idx2state,
+            observed_potencies,
+        )
+        if forced_support_edges:
+            logger.info(
+                "Phase 2: force-added %d support edges for rare observed states: %s",
+                len(forced_support_edges),
+                [
+                    (
+                        idx2state[src],
+                        idx2state[dst],
+                        weight,
+                    )
+                    for src, dst, weight in forced_support_edges
+                ],
             )
-            old_idx2potency[idx] = tuple(potency)
-
-        # Remove states that cannot reach any observed terminal.
-        kept_old_idxs = [idx for idx in reachable_idxs if len(old_idx2potency[idx]) > 0]
-        dropped_old_idxs = sorted(set(reachable_idxs) - set(kept_old_idxs))
+        kept_old_idxs, dropped_old_idxs, old_idx2potency, mandatory_old_idxs = _collect_phase2_kept_states(
+            trees,
+            idx2state,
+            reachable_idxs,
+            idx2potency_,
+            terminal_labels,
+            observed_potencies,
+        )
+        if mandatory_old_idxs:
+            logger.info(
+                "Phase 2: force-keeping %d observed states present in the trees: %s",
+                len(mandatory_old_idxs),
+                {idx: idx2state[idx] for idx in mandatory_old_idxs},
+            )
         if dropped_old_idxs:
             logger.info(
                 "Phase 2: dropping %d reachable states with empty observed potency: %s",
@@ -582,14 +918,20 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         }
         initial_idx = old2newidx[starting_idx]
 
-        idx2potency = {new_idx: potency for new_idx, potency in enumerate(ordered_potencies)}
-        newidx2state = {}
-        for new_idx, potency in idx2potency.items():
-            if len(potency) == 1 and potency[0] in terminal_set:
-                newidx2state[new_idx] = potency[0]
-            else:
-                newidx2state[new_idx] = f"U{new_idx}"
-        state2newidx = {state: new_idx for new_idx, state in newidx2state.items()}
+        idx2potency, newidx2state, state2newidx = _build_phase2_label_maps(
+            ordered_potencies, terminal_labels, observed_potencies
+        )
+
+        observed_nonterminal_aliases = {
+            state: state2newidx[state]
+            for state in observed_potencies
+            if state in state2newidx and state not in terminal_set
+        }
+        if observed_nonterminal_aliases:
+            logger.info(
+                "Phase 2: preserved observed non-terminal labels as aliases: %s",
+                observed_nonterminal_aliases,
+            )
 
         n_states_new = len(idx2potency)
         logger.info(
@@ -632,6 +974,14 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
             "backend": backend,
         }
 
+        logger.info(
+            f"idx2state:    {newidx2state}"
+        )
+        logger.info(
+            f"idx2potency:  {idx2potency}"
+        )
+
+
         trees_copy = copy.deepcopy(trees)
         for tree in trees_copy:
             for leaf in tree.get_leaves():
@@ -647,6 +997,7 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         _compute_classe_mle(
             trees_copy, n_states_new, device, output_dir,
             phase2_model_info, sampling_prob, l1_reg=debiasing_l1,
+            regularization_type=phase2_penalty,
         )
 
         return output_dir
@@ -713,7 +1064,7 @@ def run_model_selection(output_dir, trees, reg_values, threshold,
 
             root_distribution = model_dict["root_distribution"]
             starting_idx = torch.argmax(root_distribution).item()
-            reachable = get_reachable_idxs(B_np, starting_idx, threshold)
+            num_reachable = len(B_np)
 
             # Reconstruct model from state_dict for likelihood evaluation
             trees_copy = copy.deepcopy(trees)
@@ -742,6 +1093,8 @@ def run_model_selection(output_dir, trees, reg_values, threshold,
             )
             eval_model.eval()
 
+            print(eval_model.get_daughter_kernel())
+
             with torch.no_grad():
                 eval_model.precompute_ode()
                 log_lik = sum(
@@ -751,12 +1104,12 @@ def run_model_selection(output_dir, trees, reg_values, threshold,
 
             results.append({
                 "reg": reg,
-                "num_states": len(reachable),
+                "num_states": num_reachable,
                 "neg_llh": -log_lik,
                 "model_dir": model_dir,
             })
             logger.info("reg=%s: %d reachable states, neg-llh=%.4f",
-                        reg, len(reachable), -log_lik)
+                        reg, num_reachable, -log_lik)
 
         except Exception as e:
             logger.warning("Model selection failed for reg=%s: %s", reg, e)
@@ -842,7 +1195,12 @@ def main():
     parser.add_argument(
         "--regularizations", type=float, nargs="+",
         default=[0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30],
-        help="List of L1 regularization values for Phase 1",
+        help="List of regularization strengths for Phase 1",
+    )
+    parser.add_argument(
+        "--phase1_penalty", type=str, default="l1",
+        choices=["l1", "column_group_lasso"],
+        help="Penalty family for Phase 1 regularization",
     )
     parser.add_argument(
         "--max_hidden_states", type=int, default=1000,
@@ -850,10 +1208,15 @@ def main():
     )
     parser.add_argument(
         "--debiasing_l1", type=float, default=0.0001,
-        help="L1 regularization for Phase 2 (debiasing)",
+        help="Regularization strength for Phase 2 (debiasing)",
     )
     parser.add_argument(
-        "--reachability_threshold", type=float, default=0.00001,
+        "--phase2_penalty", type=str, default="l1",
+        choices=["l1", "column_group_lasso"],
+        help="Penalty family for Phase 2 regularization",
+    )
+    parser.add_argument(
+        "--reachability_threshold", type=float, default=0.0001,
         help="Threshold for get_reachable_idxs",
     )
     parser.add_argument(
@@ -876,6 +1239,10 @@ def main():
     parser.add_argument(
         "--skip_phase_1", action="store_true",
         help="Whether to skip the potency inference part",
+    )
+    parser.add_argument(
+        "--model_selection_only", action="store_true",
+        help="Skip Phase 1/2 and run model selection using existing reg=<value> folders in output_dir",
     )
     args = parser.parse_args()
 
@@ -908,6 +1275,28 @@ def main():
     logger.info("Observed potencies (%d): %s",
                 len(observed_potencies), observed_potencies)
 
+    if args.model_selection_only:
+        discovered_regs = _discover_regularizations_from_output_dir(args.output_dir)
+        if not discovered_regs:
+            raise RuntimeError(
+                f"No reg=<value> directories found under {args.output_dir}"
+            )
+        logger.info("Model-selection-only mode: found regularizations %s", discovered_regs)
+        selection = run_model_selection(
+            args.output_dir, trees, discovered_regs,
+            args.reachability_threshold, args.knee_sensitivity, device,
+        )
+        _write_model_selection_outputs(
+            args.output_dir, selection, args.sampling_probability
+        )
+        logger.info(
+            "Done! Best model: reg=%s, %d states, neg-llh=%.4f",
+            selection["best_reg"],
+            selection["knee_num_states"],
+            selection["knee_loss"],
+        )
+        return
+
     # --- Collect observed states from trees ---
     states = set()
     for tree in trees:
@@ -937,13 +1326,17 @@ def main():
 
     for reg in args.regularizations:
         reg_dir = f"{args.output_dir}/reg={reg}"
+        phase1_ok = True
+
         if not args.skip_phase_1:
             logger.info("=" * 60)
             logger.info("Phase 1: reg=%s", reg)
             logger.info("=" * 60)
+
             phase1_ok = run_phase1(
                 trees, model_info, state2idx, num_obs, num_hidden,
                 reg, args.sampling_probability, reg_dir, device,
+                phase1_penalty=args.phase1_penalty,
             )
 
         if (args.skip_phase_1 or phase1_ok) and reg > 0:
@@ -954,6 +1347,7 @@ def main():
                 reg_dir, trees, terminal_labels, observed_potencies,
                 is_int_state, args.sampling_probability,
                 args.debiasing_l1, args.reachability_threshold, device, args.backend,
+                phase2_penalty=args.phase2_penalty,
             )
 
     # --- Model selection ---
@@ -964,30 +1358,9 @@ def main():
         args.output_dir, trees, args.regularizations,
         args.reachability_threshold, args.knee_sensitivity, device,
     )
-
-    # --- Copy best model ---
-    best_src = f"{selection['best_model_dir']}/model_dict.pkl"
-    best_dst = f"{args.output_dir}/best_model_dict.pkl"
-    shutil.copy2(best_src, best_dst)
-    logger.info("Best model copied to %s", best_dst)
-
-    # --- Write summary ---
-    summary_path = f"{args.output_dir}/classe_troupe_summary.txt"
-    with open(summary_path, "w") as fp:
-        fp.write(f"best_reg\t{selection['best_reg']}\n")
-        fp.write(f"best_model_dir\t{selection['best_model_dir']}\n")
-        fp.write(f"knee_num_states\t{selection['knee_num_states']}\n")
-        fp.write(f"knee_loss\t{selection['knee_loss']}\n")
-        fp.write(f"sampling_probability\t{args.sampling_probability}\n")
-        fp.write(
-            f"num_regularizations_tested\t{len(selection['all_results'])}\n"
-        )
-        fp.write("\nAll results:\n")
-        fp.write("reg\tnum_states\tneg_llh\n")
-        for r in selection["all_results"]:
-            fp.write(f"{r['reg']}\t{r['num_states']}\t{r['neg_llh']}\n")
-
-    logger.info("Summary written to %s", summary_path)
+    _write_model_selection_outputs(
+        args.output_dir, selection, args.sampling_probability
+    )
     logger.info(
         "Done! Best model: reg=%s, %d states, neg-llh=%.4f",
         selection["best_reg"],

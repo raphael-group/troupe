@@ -542,7 +542,13 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
 
         if self.backend == "fundamental":
             fundamental = self._compute_fundamental_piecewise(time_grid, E_vals, B, lam)
-            fundamental_inv = torch.linalg.inv(fundamental)  # (T, K, K)
+            # Add small Tikhonov regularization to prevent singularity.
+            # The fundamental matrix can become rank-deficient in extreme parameter
+            # regimes where extinction probabilities approach 1, causing accumulated
+            # floating-point underflow to zero in some rows/columns.
+            K = self.num_states
+            tikh = 1e-8 * torch.eye(K, device=self.device, dtype=dtype).unsqueeze(0)
+            fundamental_inv = torch.linalg.inv(fundamental + tikh)  # (T, K, K)
 
             if self._pair_child_time_idxs.numel() > 0:
                 log_props = torch.log(

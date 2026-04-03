@@ -1,5 +1,5 @@
 import ete3 as ete
-import torch
+import numpy as np
 import warnings
 from likelihood import EPS
 import math
@@ -97,7 +97,7 @@ def is_ultrametric(tree):
     leaf_dists = [tree.get_distance(leaf) for leaf in tree.get_leaves()]
     return all([math.isclose(leaf_dists[i-1], leaf_dists[i], rel_tol=1e-2) for i in range(1, len(leaf_dists))])
 
-def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0):
+def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0, is_daughter_kernel=False):
     """Infers potency sets from a rate matrix via matrix exponentiation.
 
     Computes the transition matrix at a large time scale (100 * tree_length)
@@ -113,7 +113,13 @@ def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0):
         A dict mapping each state index to a sorted tuple of reachable
         state indices.
     """
-    transition_matrix = expm(100 * tree_length * rate_matrix)
+
+    if is_daughter_kernel:
+        transition_matrix = np.linalg.matrix_power(rate_matrix, 1)
+    else:
+        transition_matrix = expm(100 * tree_length * rate_matrix)
+
+    print(transition_matrix)
 
     n = len(transition_matrix)
     idx2list = {}
