@@ -1686,9 +1686,8 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
     self-edge weights equal to the inferred growth rates.
 
     Usage example:
-        BASE_DIR=/Users/william_hs/Desktop/Projects/troupe;
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i $BASE_DIR/tmp/classe_results
+            -i $PWD/results/subsampled_leaves_4_terminals/classe/fundamental/trees_16/time_5.0/sample_0.1/trial_0
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)
