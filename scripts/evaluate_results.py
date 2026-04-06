@@ -52,16 +52,28 @@ plt.rcParams['ps.fonttype'] = 42
 plt.rcParams['svg.fonttype'] = 'none'
 
 
-# color_list = [
-#         '#e41a1c',
-#         '#377eb8',
-#         '#4daf4a',
-#         '#984ea3',
-#         '#ff7f00',
-#         '#ffff33',
-#         '#a65628',
-#         '#f781bf'
-#     ]
+def _build_plot_state2potency(idx2state, idx2potency, terminal_idxs):
+    """Convert a saved potency map into terminal-index wedges for plotting."""
+    state2idx = {state: idx for idx, state in idx2state.items()}
+    state2potency_filtered = {}
+    if idx2potency is None:
+        return state2potency_filtered
+
+    for idx, potency in idx2potency.items():
+        filtered = []
+        for item in potency:
+            if item in state2idx:
+                mapped_idx = state2idx[item]
+            elif isinstance(item, (int, np.integer)) and item in idx2state:
+                mapped_idx = int(item)
+            else:
+                continue
+            if mapped_idx in terminal_idxs:
+                filtered.append(mapped_idx)
+        if filtered:
+            state2potency_filtered[idx] = tuple(sorted(set(filtered)))
+    return state2potency_filtered
+
 
 color_list = [
     '#1b9e77',
@@ -74,6 +86,14 @@ color_list = [
     '#f781bf',
     '#999999'
 ]
+
+tls_colors = {
+    'NeuralTube': '#1b9e77',
+    'Somite': '#d95f02',
+    'Endoderm': '#7570b3',
+    'PCGLC': '#e7298a',
+    'Endothelial': '#66a61e'
+}
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1679,7 +1699,8 @@ def plot_expected_population_composition():
 @click.option('--use-select-potencies/--no-select-potencies', default=True,
               show_default=True,
               help='If set, plot from select_potencies/ when available.')
-def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
+@click.option('--color-scheme', default=None)
+def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_scheme):
     """Plot differentiation maps for all reg=X results in a directory.
 
     Treats each inferred Q matrix as a weighted directed graph with
@@ -1720,8 +1741,6 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
 
         if "daughter_kernel" in model_dict:
             rate_matrix = model_dict['daughter_kernel'].detach().numpy()
-            mask = np.eye(len(rate_matrix), dtype=bool)
-            rate_matrix[mask] = 0
         else:
             rate_matrix = model_dict['rate_matrix'].detach().numpy()
         root_distribution = model_dict['root_distribution']
@@ -1747,25 +1766,35 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies):
         for idx in sorted(idx2state.keys()):
             state = str(idx2state[idx])
             if idx in terminal_idxs:
-                node_colors[state] = color_list[terminal_color_idx % len(color_list)]
+                if color_scheme == "tls":
+                    node_colors[state] = tls_colors[state]
+                else:
+                    node_colors[state] = color_list[terminal_color_idx % len(color_list)]
+
                 terminal_color_idx += 1
             else:
                 node_colors[state] = '#FFFFFF'
 
-        # Build state2potency for wedge coloring
-        state2potency = get_idx2potency(rate_matrix)
-        # Filter potencies to terminal states only
-        state2potency_filtered = {}
-        for idx, potency in state2potency.items():
-            filtered = [s for s in potency if s in terminal_idxs]
-            if filtered:
-                filtered.sort()
-                state2potency_filtered[idx] = tuple(filtered)
+        # Build state2potency for wedge coloring. Prefer the saved reduced
+        # potency map when available; it is the authoritative Phase 2 result
+        # for ClaSSE models and preserves observed non-terminal aliases.
+        state2potency_filtered = _build_plot_state2potency(idx2state, idx2potency, terminal_idxs)
+        if idx2potency is None:
+            state2potency = get_idx2potency(rate_matrix, is_daughter_kernel="daughter_kernel" in model_dict)
+            for idx, potency in state2potency.items():
+                filtered = [s for s in potency if s in terminal_idxs]
+                if filtered:
+                    filtered.sort()
+                    state2potency_filtered[idx] = tuple(filtered)
 
         # Output
         figure_dir = os.path.join(model_dir, 'figures')
         os.makedirs(figure_dir, exist_ok=True)
         outfile = os.path.join(figure_dir, 'differentiation_map.pdf')
+
+        if "daughter_kernel" in model_dict:
+            mask = np.eye(len(rate_matrix), dtype=bool)
+            rate_matrix[mask] = 0
 
         draw_weighted_graph(
             rate_matrix,

@@ -3,10 +3,46 @@ import numpy as np
 from collections import defaultdict, deque
 from graphviz import Digraph
 
-import os
-import numpy as np
-from collections import defaultdict, deque
-from graphviz import Digraph
+
+def _augment_edges_for_required_nodes(adj_matrix, edges, required_nodes, active_nodes=None):
+    """Ensure required nodes are present and have at least one incoming edge.
+
+    This is intended for visualization only. It preserves rare observed states
+    that would otherwise disappear under a global edge threshold.
+    """
+    if required_nodes is None:
+        return edges, set(active_nodes) if active_nodes is not None else set()
+
+    nodes = set(active_nodes) if active_nodes is not None else set()
+    required_nodes = set(required_nodes)
+    nodes |= required_nodes
+
+    augmented_edges = list(edges)
+    existing_incoming = {v for u, v, _ in augmented_edges if u != v}
+    n = adj_matrix.shape[0]
+
+    for target in sorted(required_nodes):
+        if target in existing_incoming:
+            continue
+
+        candidate_sources = [
+            u for u in nodes
+            if 0 <= u < n and u != target and float(adj_matrix[u, target]) > 0.0
+        ]
+        if not candidate_sources:
+            candidate_sources = [
+                u for u in range(n)
+                if u != target and float(adj_matrix[u, target]) > 0.0
+            ]
+        if not candidate_sources:
+            continue
+
+        best_source = max(candidate_sources, key=lambda u: float(adj_matrix[u, target]))
+        augmented_edges.append((best_source, target, float(adj_matrix[best_source, target])))
+        nodes.add(best_source)
+        existing_incoming.add(target)
+
+    return augmented_edges, nodes
 
 def draw_weighted_graph(adj_matrix,
                         outfile,
@@ -64,6 +100,7 @@ def draw_weighted_graph(adj_matrix,
 
     nodes_in_edges = {u for u, v, _ in edges} | {v for u, v, _ in edges}
     all_nodes = set(range(n))
+    required_nodes = set(terminal_idxs) if terminal_idxs is not None else set()
 
     # Optional pruning from starting state
     if totipotent_state is not None:
@@ -79,9 +116,16 @@ def draw_weighted_graph(adj_matrix,
                 if v not in reachable:
                     reachable.add(v); q.append(v)
         edges = [(u, v, w) for (u, v, w) in edges if u in reachable and v in reachable]
-        nodes = reachable
+        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
+            adj_matrix, edges, required_nodes, active_nodes=reachable
+        )
+        nodes = reachable | required_augmented_nodes
     else:
-        nodes = nodes_in_edges if nodes_in_edges else all_nodes
+        seed_nodes = nodes_in_edges if nodes_in_edges else all_nodes
+        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
+            adj_matrix, edges, required_nodes, active_nodes=seed_nodes
+        )
+        nodes = seed_nodes | required_augmented_nodes
 
     # Degrees (ignoring self-loops for terminal detection)
     outdeg = defaultdict(int)
@@ -94,8 +138,8 @@ def draw_weighted_graph(adj_matrix,
         terminals = terminal_idxs
 
     max_w = max([w for _, _, w in edges], default=1.0)
-    max_transition = max([w for u, v, w in edges if u != v])
-    max_growth = max([w for u, v, w in edges if u == v])
+    max_transition = max([w for u, v, w in edges if u != v], default=1.0)
+    max_growth = max([w for u, v, w in edges if u == v], default=1.0)
 
     # DAG detection
     dag_levels = _dag_levels(nodes, edges)  # returns dict node->level or None if cyclic
