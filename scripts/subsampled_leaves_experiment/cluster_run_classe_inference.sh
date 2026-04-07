@@ -8,10 +8,10 @@ set -euo pipefail
 #   bash scripts/subsampled_leaves_experiment/cluster_run_classe_inference.sh
 #
 # Common overrides:
-#   DRY_RUN=1 TREE_COUNTS="64 128" SAMPLE_PROBS="0.4" \
+#   TREE_COUNTS="8" SAMPLE_PROBS="0.05 0.1 0.2" SBATCH_TIME=1-00:00:00 SBATCH_MEM=32G\
 #     bash scripts/subsampled_leaves_experiment/cluster_run_classe_inference.sh
 #
-#   BACKEND=vector_transport SBATCH_TIME=2-00:00:00 SBATCH_MEM=32G \
+#   BACKEND=vector_transport SBATCH_TIME=1-00:00:00 SBATCH_MEM=32G \
 #     bash scripts/subsampled_leaves_experiment/cluster_run_classe_inference.sh
 #
 #   SKIP_PHASE_1=1 DEVICE=cuda SBATCH_MEM=16G \
@@ -25,13 +25,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${WORKDIR:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 
 BACKEND="${BACKEND:-fundamental}"
-EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-${WORKDIR}/experiments/subsampled_leaves}"
-RESULTS_ROOT="${RESULTS_ROOT:-${WORKDIR}/results/subsampled_leaves/classe/${BACKEND}}"
+EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-${WORKDIR}/experiments/subsampled_leaves_4_terminals}"
+RESULTS_ROOT="${RESULTS_ROOT:-${WORKDIR}/results/subsampled_leaves_4_terminals/classe/${BACKEND}}"
 
-PYTHON_BIN="${PYTHON_BIN:-${WORKDIR}/.venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-${WORKDIR}/../.venv/bin/python}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-}"
 
-REGULARIZATIONS_STR="${REGULARIZATIONS_STR:-0.001 0.003 0.01 0.03 0.1 0.3 1 3 10 30}"
+REGULARIZATIONS_STR="${REGULARIZATIONS_STR:-0.0001 0.001 0.01 0.1 1 10}"
 MAX_HIDDEN_STATES="${MAX_HIDDEN_STATES:-1000}"
 DEBIASING_L1="${DEBIASING_L1:-0.0001}"
 REACHABILITY_THRESHOLD="${REACHABILITY_THRESHOLD:-0.00001}"
@@ -45,15 +45,15 @@ CLASSE_EXTRA_ARGS="${CLASSE_EXTRA_ARGS:-}"
 TREE_COUNTS="${TREE_COUNTS:-}"
 PROCESS_TIMES="${PROCESS_TIMES:-}"
 SAMPLE_PROBS="${SAMPLE_PROBS:-}"
-TRIALS="${TRIALS:-}"
+TRIALS="${TRIALS:-0 1 2 3 4 5 6 7 8 9}"
 
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 JOB_NAME_PREFIX="${JOB_NAME_PREFIX:-classe}"
 
 SBATCH_TIME="${SBATCH_TIME:-12:00:00}"
-SBATCH_CPUS="${SBATCH_CPUS:-1}"
-SBATCH_MEM="${SBATCH_MEM:-16G}"
+SBATCH_CPUS="${SBATCH_CPUS:-4}"
+SBATCH_MEM="${SBATCH_MEM:-32G}"
 SBATCH_PARTITION="${SBATCH_PARTITION:-}"
 SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-}"
 SBATCH_QOS="${SBATCH_QOS:-}"
