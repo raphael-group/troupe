@@ -7,7 +7,7 @@ This is the baseline against which TROUPE's potency constraints are evaluated.
 
 The state space consists of the observed terminal types found in the data plus
 an optional number of hidden (unobserved) states specified by --num_hidden.
-A single MLE optimisation is run (no regularisation sweep, no Phase 1/2 split).
+A single MLE optimization is run (no regularization sweep, no Phase 1/2 split).
 
 Usage:
     python scripts/run_classe_unconstrained.py \
@@ -84,7 +84,7 @@ def detect_labels(trees):
 def build_model_info(terminal_labels, num_hidden: int, backend: str):
     """Build state-space description for the unconstrained model.
 
-    Observed terminal states are indexed 0 … n_obs-1; hidden states follow.
+    Observed terminal states are indexed 0 ... n_obs-1; hidden states follow.
     All states are assigned potency = full set of terminal labels so that
     downstream utilities reading idx2potency are not confused.  The
     DaughterKernelBuilder receives idx2potency=None (mask = all ones,
@@ -105,7 +105,7 @@ def build_model_info(terminal_labels, num_hidden: int, backend: str):
 
     # Root is the first hidden state when hidden states exist so that the model
     # has an unobserved ancestor (matching the TROUPE convention).  With no
-    # hidden states the root distribution is left free (optimised).
+    # hidden states the root distribution is left free (optimized).
     start_state = n_obs if num_hidden > 0 else None
 
     model_info = {
@@ -144,7 +144,7 @@ def _save_model_dict(llh, model_info, sampling_prob: float, n_states: int,
 
 
 # ---------------------------------------------------------------------------
-# Optimisation
+# Optimization
 # ---------------------------------------------------------------------------
 
 def run_mle(
@@ -168,13 +168,27 @@ def run_mle(
     backend    = model_info.get("backend", "fundamental")
 
     lam0 = constant_rate_mle(trees_labeled)
-    bk_params_init = torch.zeros(n_states, n_states, device=device, dtype=dtype)
+
+    # Initialise the birth kernel with 0.75 on the diagonal and the remaining
+    # 0.25 spread uniformly across off-diagonal entries.  This matches the
+    # implicit starting point of the potency-constrained model: with zero free
+    # logits and a mask that allows all transitions, every row would be uniform,
+    # but terminal rows are effectively pinned to self-replication by the mask.
+    # A self-replication-biased initialisation avoids the unconstrained model
+    # spending many iterations driving terminal-row logits from 0 toward ±∞.
+    target_offdiag = 0.25 / max(n_states - 1, 1)
+    target_B = torch.full(
+        (n_states, n_states), target_offdiag, device=device, dtype=dtype
+    )
+    target_B.fill_diagonal_(0.75)
+    bk_params_init = torch.log(target_B)   # softmax(log(B)) == B for prob vectors
+
     growth_params_init = _safe_softplus_inverse(
         torch.ones(n_states, device=device, dtype=dtype) * lam0
     )
     pi_params_init = torch.zeros(n_states, device=device, dtype=dtype)
 
-    # idx2potency=None → DaughterKernelBuilder uses mask of all ones (unconstrained).
+    # idx2potency=None --> DaughterKernelBuilder uses mask of all ones (unconstrained).
     llh = ClaSSELikelihoodModel(
         trees_labeled, n_states,
         bk_params_init, pi_params_init, growth_params_init,
@@ -207,6 +221,13 @@ def run_mle(
 
     def closure():
         optimizer.zero_grad()
+        # Clamp pi_params before every forward pass (including inside LBFGS
+        # line-search evaluations).  When start_state=None the root logits are
+        # free; with a flat likelihood in that direction LBFGS can step them
+        # past 700, causing exp() to overflow to +inf.
+        if llh.pi_params.requires_grad:
+            with torch.no_grad():
+                llh.pi_params.clamp_(-500.0, 500.0)
         llh.precompute_ode()
         obj = _objective()
         if not torch.isfinite(obj):
@@ -260,7 +281,7 @@ def run_mle(
         torch.save(llh.state_dict(), best_state_path)
         _save_model_dict(llh, model_info, sampling_prob, n_states, output_dir)
 
-    # Evaluate pure (unregularised) log-likelihood at the best checkpoint.
+    # Evaluate pure (unregularized) log-likelihood at the best checkpoint.
     with torch.no_grad():
         llh.precompute_ode()
         log_lik = sum(llh(j).item() for j in tree_idxs)
@@ -300,7 +321,7 @@ def main():
     )
     parser.add_argument(
         "--l1", type=float, default=0.0,
-        help="L1 regularisation on off-diagonal birth-kernel entries. "
+        help="L1 regularization on off-diagonal birth-kernel entries. "
              "Default: 0.0 (fully unconstrained).",
     )
     parser.add_argument("--device", type=str, default="cpu",

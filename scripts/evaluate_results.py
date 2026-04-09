@@ -1708,7 +1708,7 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
 
     Usage example:
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i $PWD/results/subsampled_leaves_4_terminals/classe/fundamental/trees_16/time_5.0/sample_0.1/trial_0
+            -i $PWD/tmp/c_elegans_subsample_ABa
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)
@@ -1774,6 +1774,13 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
                 terminal_color_idx += 1
             else:
                 node_colors[state] = '#FFFFFF'
+
+        if idx2potency is not None:
+            for idx in range(len(rate_matrix)):
+                reachable_idxs = get_reachable_idxs(rate_matrix, idx, 0.01)
+                potency = [idx2state[_idx] for _idx in reachable_idxs]
+                potency.sort()
+                idx2potency[idx] = tuple(potency)
 
         # Build state2potency for wedge coloring. Prefer the saved reduced
         # potency map when available; it is the authoritative Phase 2 result
