@@ -169,19 +169,26 @@ def run_mle(
 
     lam0 = constant_rate_mle(trees_labeled)
 
-    # Initialise the birth kernel with 0.75 on the diagonal and the remaining
-    # 0.25 spread uniformly across off-diagonal entries.  This matches the
-    # implicit starting point of the potency-constrained model: with zero free
-    # logits and a mask that allows all transitions, every row would be uniform,
-    # but terminal rows are effectively pinned to self-replication by the mask.
-    # A self-replication-biased initialisation avoids the unconstrained model
-    # spending many iterations driving terminal-row logits from 0 toward ±∞.
-    target_offdiag = 0.25 / max(n_states - 1, 1)
-    target_B = torch.full(
-        (n_states, n_states), target_offdiag, device=device, dtype=dtype
-    )
-    target_B.fill_diagonal_(0.75)
-    bk_params_init = torch.log(target_B)   # softmax(log(B)) == B for prob vectors
+    # Initialise the birth kernel row-by-row:
+    #   - Observed (terminal) states: 0.75 self-replication, 0.25 spread uniformly.
+    #   - Hidden states: 0.25 self-replication, 0.75 spread uniformly.
+    # Hidden states get a lower self-replication bias so they are free to route
+    # probability mass toward the observed types rather than locking into
+    # self-replicating local minima.
+    # Observed states are those whose potency has exactly one element (self only).
+    idx2potency = model_info["idx2potency"]
+    observed_idxs = {i for i, p in idx2potency.items() if len(p) == 1}
+
+    bk_params_init = torch.empty(n_states, n_states, device=device, dtype=dtype)
+    for i in range(n_states):
+        if i in observed_idxs:
+            diag_val, offdiag_sum = 0.75, 0.25
+        else:
+            diag_val, offdiag_sum = 0.25, 0.75
+        offdiag_val = offdiag_sum / max(n_states - 1, 1)
+        row = torch.full((n_states,), offdiag_val, device=device, dtype=dtype)
+        row[i] = diag_val
+        bk_params_init[i] = torch.log(row)  # softmax(log(B)) == B
 
     growth_params_init = _safe_softplus_inverse(
         torch.ones(n_states, device=device, dtype=dtype) * lam0
