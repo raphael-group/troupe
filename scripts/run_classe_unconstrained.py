@@ -168,7 +168,21 @@ def run_mle(
     backend    = model_info.get("backend", "fundamental")
 
     lam0 = constant_rate_mle(trees_labeled)
-    bk_params_init = torch.zeros(n_states, n_states, device=device, dtype=dtype)
+
+    # Initialise the birth kernel with 0.75 on the diagonal and the remaining
+    # 0.25 spread uniformly across off-diagonal entries.  This matches the
+    # implicit starting point of the potency-constrained model: with zero free
+    # logits and a mask that allows all transitions, every row would be uniform,
+    # but terminal rows are effectively pinned to self-replication by the mask.
+    # A self-replication-biased initialisation avoids the unconstrained model
+    # spending many iterations driving terminal-row logits from 0 toward ±∞.
+    target_offdiag = 0.25 / max(n_states - 1, 1)
+    target_B = torch.full(
+        (n_states, n_states), target_offdiag, device=device, dtype=dtype
+    )
+    target_B.fill_diagonal_(0.75)
+    bk_params_init = torch.log(target_B)   # softmax(log(B)) == B for prob vectors
+
     growth_params_init = _safe_softplus_inverse(
         torch.ones(n_states, device=device, dtype=dtype) * lam0
     )
