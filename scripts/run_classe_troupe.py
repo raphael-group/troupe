@@ -1093,8 +1093,6 @@ def run_model_selection(output_dir, trees, reg_values, threshold,
             )
             eval_model.eval()
 
-            print(eval_model.get_daughter_kernel())
-
             with torch.no_grad():
                 eval_model.precompute_ode()
                 log_lik = sum(
