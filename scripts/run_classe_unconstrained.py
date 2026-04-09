@@ -11,10 +11,10 @@ A single MLE optimization is run (no regularization sweep, no Phase 1/2 split).
 
 Usage:
     python scripts/run_classe_unconstrained.py \
-        -i experiments/c_elegans/packer/benchmark_processed/sample_0.5/trial_0/trees.pkl \
+        -i /n/fs/ragr-research/users/wh8114/projects/troupe/experiments/subsampled_leaves_4_terminals/trees_32/time_5.0/sample_0.4/trial_0/trees.pkl \
         -o tmp/unconstrained \
-        --num_hidden 2 \
-        --sampling_probability 0.37
+        --num_hidden 4 \
+        --sampling_probability 0.4
 """
 
 import argparse
@@ -156,7 +156,7 @@ def run_mle(
     sampling_prob: float,
     l1_reg: float = 0.0,
     num_iter: int = 100,
-    log_iter: int = 10,
+    log_iter: int = 1,
 ):
     """Fit unconstrained ClaSSE via LBFGS; checkpoint on improvement.
 
@@ -245,7 +245,7 @@ def run_mle(
         llh.clear_ode_cache()
         return obj
 
-    t0 = time.time()
+    start = time.time()
     for i in range(num_iter):
         optimizer.step(closure)
         if closure_state["last_loss"] is None:
@@ -263,9 +263,15 @@ def run_mle(
             _save_model_dict(llh, model_info, sampling_prob, n_states, output_dir)
 
         if i % log_iter == 0:
-            elapsed = time.time() - t0
-            logger.info("Iter %d | loss=%.6f | %.2fs elapsed", i, loss_value, elapsed)
-            t0 = time.time()
+            logger.info(
+                "Iter %d | loss=%.6f | B diag=%s | lam=%s",
+                i, loss_value,
+                llh.get_daughter_kernel().diag().detach().tolist(),
+                llh.get_growth_rates().detach().tolist(),
+            )
+            elapsed = time.time() - start
+            logger.info("  %.4f s/iter", elapsed / min(i + 1, log_iter))
+            start = time.time()
 
         if len(losses) > 2:
             rel = abs(losses[-1] - losses[-2]) / (abs(losses[-2]) + EPS)
