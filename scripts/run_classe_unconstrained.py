@@ -9,12 +9,16 @@ The state space consists of the observed terminal types found in the data plus
 an optional number of hidden (unobserved) states specified by --num_hidden.
 A single MLE optimization is run (no regularization sweep, no Phase 1/2 split).
 
+NOTE: This assumes that all observed states are terminal states.
+
 Usage:
     python scripts/run_classe_unconstrained.py \
-        -i /n/fs/ragr-research/users/wh8114/projects/troupe/experiments/subsampled_leaves_4_terminals/trees_32/time_5.0/sample_0.4/trial_0/trees.pkl \
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves_4_terminals/trees_32/time_5.0/sample_0.1/trial_0/trees.pkl \
         -o tmp/unconstrained \
         --num_hidden 4 \
-        --sampling_probability 0.4
+        --sampling_probability 0.1 \
+        --num_restarts 5 \
+        --num_iter 200
 """
 
 import argparse
@@ -52,6 +56,70 @@ def _safe_softplus_inverse(x: torch.Tensor) -> torch.Tensor:
     return torch.log(torch.expm1(x))
 
 
+def _make_bk_params_init(
+    n_states: int,
+    observed_idxs: set,
+    device,
+    rng=None,
+    start_state=None,
+) -> torch.Tensor:
+    """Return initial birth-kernel logits as an (n_states, n_states) tensor.
+
+    Observed state rows use a fixed 0.75 self-replication bias.
+
+    The start_state row (the root whose pi is a fixed point mass) is always
+    initialised to uniform — i.e. zeros, so softmax gives 1/n_states.  This
+    avoids any prior bias about which terminal type the root preferentially
+    produces before gradient information is available.
+
+    Other hidden state rows are either:
+    - deterministic (rng=None): 0.25 on diagonal, rest uniform.
+    - random (rng provided): each row concentrates ~75% mass on a distinct
+      random subset of terminal states, breaking the symmetry that locks all
+      hidden states into identical rows.
+
+    Args:
+        n_states:      Total number of states (observed + hidden).
+        observed_idxs: Set of integer indices for observed (terminal) states.
+        device:        Torch device.
+        rng:           numpy.random.Generator for random restarts, or None for
+                       the deterministic default.
+        start_state:   Integer index of the root state (pi fixed here), or None.
+    """
+    obs_sorted = sorted(observed_idxs)
+    n_obs = len(obs_sorted)
+    bk = torch.empty(n_states, n_states, device=device, dtype=dtype)
+
+    for i in range(n_states):
+        if i == start_state:
+            # Uniform row: softmax(zeros) = 1/n_states for all columns.
+            bk[i] = torch.zeros(n_states, device=device, dtype=dtype)
+        elif i in observed_idxs:
+            offdiag = 0.1 / max(n_states - 1, 1)
+            row = torch.full((n_states,), offdiag, device=device, dtype=dtype)
+            row[i] = 0.9
+            bk[i] = torch.log(row.clamp(min=EPS))
+        elif rng is None:
+            # Deterministic default for non-root hidden states.
+            offdiag = 0.9 / max(n_states - 1, 1)
+            row = torch.full((n_states,), offdiag, device=device, dtype=dtype)
+            row[i] = 0.1
+            bk[i] = torch.log(row.clamp(min=EPS))
+        else:
+            # Random subset assignment: hidden state i specialises toward a
+            # random subset of k terminals, with ~0.9 mass inside the subset
+            # and ~0.1 spread over the remaining n_states - k entries.
+            k = int(rng.integers(1, n_obs))
+            subset = set(rng.choice(obs_sorted, size=k, replace=False).tolist())
+            n_other = max(n_states - k, 1)
+            row = torch.full((n_states,), 0.1 / n_other, device=device, dtype=dtype)
+            for j in subset:
+                row[j] = 0.9 / k
+            bk[i] = torch.log(row.clamp(min=EPS))
+
+    return bk
+
+
 def load_trees(input_path: str, newick_format: int = 1):
     if input_path.endswith(".pkl"):
         with open(input_path, "rb") as fp:
@@ -73,7 +141,7 @@ def load_trees(input_path: str, newick_format: int = 1):
 
 
 def detect_labels(trees):
-    """Return sorted list of terminal labels found at tree leaves."""
+    """Return sorted list of observed labels found at tree leaves."""
     states = set()
     for tree in trees:
         for leaf in tree.get_leaves():
@@ -113,6 +181,7 @@ def build_model_info(terminal_labels, num_hidden: int, backend: str):
         "idx2potency": idx2potency,
         "start_state": start_state,
         "backend":     backend,
+        "observed_idxs": {state2idx[state] for state in terminal_labels} 
     }
     return model_info, state2idx
 
@@ -147,55 +216,32 @@ def _save_model_dict(llh, model_info, sampling_prob: float, n_states: int,
 # Optimization
 # ---------------------------------------------------------------------------
 
-def run_mle(
+def _run_one_restart(
     trees_labeled,
     n_states: int,
     device,
-    output_dir: str,
+    restart_dir: str,
     model_info: dict,
     sampling_prob: float,
-    l1_reg: float = 0.0,
-    num_iter: int = 100,
-    log_iter: int = 1,
-):
-    """Fit unconstrained ClaSSE via LBFGS; checkpoint on improvement.
+    bk_params_init: torch.Tensor,
+    l1_reg: float,
+    num_iter: int,
+    log_iter: int,
+) -> tuple:
+    """Run a single LBFGS optimisation from a given birth-kernel initialisation.
 
-    Returns (model, neg_log_likelihood) where neg_log_likelihood is the pure
-    total negative log-likelihood (without regularisation) at the best checkpoint.
+    Returns (llh_model, neg_log_likelihood).
     """
-    idx2state  = model_info["idx2state"]
+    idx2state   = model_info["idx2state"]
     start_state = model_info.get("start_state")
-    backend    = model_info.get("backend", "fundamental")
+    backend     = model_info.get("backend", "fundamental")
 
     lam0 = constant_rate_mle(trees_labeled)
-
-    # Initialise the birth kernel row-by-row:
-    #   - Observed (terminal) states: 0.75 self-replication, 0.25 spread uniformly.
-    #   - Hidden states: 0.25 self-replication, 0.75 spread uniformly.
-    # Hidden states get a lower self-replication bias so they are free to route
-    # probability mass toward the observed types rather than locking into
-    # self-replicating local minima.
-    # Observed states are those whose potency has exactly one element (self only).
-    idx2potency = model_info["idx2potency"]
-    observed_idxs = {i for i, p in idx2potency.items() if len(p) == 1}
-
-    bk_params_init = torch.empty(n_states, n_states, device=device, dtype=dtype)
-    for i in range(n_states):
-        if i in observed_idxs:
-            diag_val, offdiag_sum = 0.75, 0.25
-        else:
-            diag_val, offdiag_sum = 0.25, 0.75
-        offdiag_val = offdiag_sum / max(n_states - 1, 1)
-        row = torch.full((n_states,), offdiag_val, device=device, dtype=dtype)
-        row[i] = diag_val
-        bk_params_init[i] = torch.log(row)  # softmax(log(B)) == B
-
     growth_params_init = _safe_softplus_inverse(
         torch.ones(n_states, device=device, dtype=dtype) * lam0
     )
     pi_params_init = torch.zeros(n_states, device=device, dtype=dtype)
 
-    # idx2potency=None --> DaughterKernelBuilder uses mask of all ones (unconstrained).
     llh = ClaSSELikelihoodModel(
         trees_labeled, n_states,
         bk_params_init, pi_params_init, growth_params_init,
@@ -228,10 +274,6 @@ def run_mle(
 
     def closure():
         optimizer.zero_grad()
-        # Clamp pi_params before every forward pass (including inside LBFGS
-        # line-search evaluations).  When start_state=None the root logits are
-        # free; with a flat likelihood in that direction LBFGS can step them
-        # past 700, causing exp() to overflow to +inf.
         if llh.pi_params.requires_grad:
             with torch.no_grad():
                 llh.pi_params.clamp_(-500.0, 500.0)
@@ -245,7 +287,7 @@ def run_mle(
         llh.clear_ode_cache()
         return obj
 
-    start = time.time()
+    t0 = time.time()
     for i in range(num_iter):
         optimizer.step(closure)
         if closure_state["last_loss"] is None:
@@ -258,9 +300,9 @@ def run_mle(
                 raise ValueError("NaN detected in daughter kernel")
 
         if losses[-1] <= min(losses):
-            os.makedirs(output_dir, exist_ok=True)
-            torch.save(llh.state_dict(), f"{output_dir}/state_dict.pth")
-            _save_model_dict(llh, model_info, sampling_prob, n_states, output_dir)
+            os.makedirs(restart_dir, exist_ok=True)
+            torch.save(llh.state_dict(), f"{restart_dir}/state_dict.pth")
+            _save_model_dict(llh, model_info, sampling_prob, n_states, restart_dir)
 
         if i % log_iter == 0:
             logger.info(
@@ -269,9 +311,9 @@ def run_mle(
                 llh.get_daughter_kernel().diag().detach().tolist(),
                 llh.get_growth_rates().detach().tolist(),
             )
-            elapsed = time.time() - start
+            elapsed = time.time() - t0
             logger.info("  %.4f s/iter", elapsed / min(i + 1, log_iter))
-            start = time.time()
+            t0 = time.time()
 
         if len(losses) > 2:
             rel = abs(losses[-1] - losses[-2]) / (abs(losses[-2]) + EPS)
@@ -279,26 +321,100 @@ def run_mle(
                 logger.info("Converged at iteration %d (rel_loss=%.2e)", i, rel)
                 break
 
-    # Restore best checkpoint
-    best_state_path = f"{output_dir}/state_dict.pth"
-    if os.path.isfile(best_state_path):
-        llh.load_state_dict(torch.load(best_state_path, map_location=device))
-    os.makedirs(output_dir, exist_ok=True)
+    # Restore best checkpoint for this restart.
+    best_path = f"{restart_dir}/state_dict.pth"
+    if os.path.isfile(best_path):
+        llh.load_state_dict(torch.load(best_path, map_location=device))
     with torch.no_grad():
-        torch.save(llh.state_dict(), best_state_path)
-        _save_model_dict(llh, model_info, sampling_prob, n_states, output_dir)
+        torch.save(llh.state_dict(), best_path)
+        _save_model_dict(llh, model_info, sampling_prob, n_states, restart_dir)
 
-    # Evaluate pure (unregularized) log-likelihood at the best checkpoint.
     with torch.no_grad():
         llh.precompute_ode()
         log_lik = sum(llh(j).item() for j in tree_idxs)
         llh.clear_ode_cache()
 
-    neg_llh = -log_lik
-    with open(f"{output_dir}/loss.txt", "w") as fp:
-        fp.write(f"{neg_llh:.6f}")
+    return llh, -log_lik
 
-    return llh, neg_llh
+
+def run_mle(
+    trees_labeled,
+    n_states: int,
+    device,
+    output_dir: str,
+    model_info: dict,
+    sampling_prob: float,
+    l1_reg: float = 0.0,
+    num_iter: int = 100,
+    log_iter: int = 1,
+    num_restarts: int = 1,
+    seed: int = 0,
+):
+    """Fit unconstrained ClaSSE via LBFGS with optional random restarts.
+
+    Restart 0 uses a deterministic initialisation:
+      - Observed states: 0.75 self-replication, 0.25 uniform over the rest.
+      - Hidden states:   0.25 self-replication, 0.75 uniform over the rest.
+
+    Restarts 1 … num_restarts-1 use random initialisations designed to break
+    the symmetry that causes hidden states to collapse to identical rows:
+      - Observed states: same deterministic 0.75 self-replication.
+      - Hidden states: each row concentrates ~0.75 mass on a distinct random
+        subset of terminal states, seeding the optimizer at different vertices
+        of the probability simplex.
+
+    The best solution across all restarts (lowest neg-llh) is written to
+    output_dir and returned.
+
+    Returns (best_model, neg_log_likelihood).
+    """
+    observed_idxs = model_info["observed_idxs"]
+    start_state   = model_info.get("start_state")
+
+    best_llh  = None
+    best_neg_llh = float("inf")
+
+    import numpy as np
+    rng_master = np.random.default_rng(seed)
+
+    for r in range(num_restarts):
+        restart_dir = os.path.join(output_dir, f"restart_{r}")
+        rng = None if r == 0 else np.random.default_rng(rng_master.integers(2**31))
+
+        logger.info("=== Restart %d / %d ===", r, num_restarts - 1)
+        bk_params_init = _make_bk_params_init(n_states, observed_idxs, device, rng,
+                                               start_state=start_state)
+
+        try:
+            llh, neg_llh = _run_one_restart(
+                trees_labeled, n_states, device, restart_dir, model_info,
+                sampling_prob, bk_params_init, l1_reg, num_iter, log_iter,
+            )
+        except Exception as e:
+            logger.warning("Restart %d failed: %s", r, e)
+            continue
+
+        logger.info("Restart %d neg-llh=%.6f", r, neg_llh)
+
+        if neg_llh < best_neg_llh:
+            best_neg_llh = neg_llh
+            best_llh = llh
+            # Copy best restart's artefacts to the top-level output_dir.
+            os.makedirs(output_dir, exist_ok=True)
+            import shutil
+            for fname in ("state_dict.pth", "model_dict.pkl"):
+                src = os.path.join(restart_dir, fname)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(output_dir, fname))
+
+    if best_llh is None:
+        raise RuntimeError("All restarts failed.")
+
+    with open(f"{output_dir}/loss.txt", "w") as fp:
+        fp.write(f"{best_neg_llh:.6f}")
+
+    logger.info("Best neg-llh across %d restart(s): %.6f", num_restarts, best_neg_llh)
+    return best_llh, best_neg_llh
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +423,7 @@ def run_mle(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Unconstrained ClaSSE MLE (baseline for TROUPE comparison)."
+        description="Unconstrained ClaSSE MLE (baseline for TROUPE comparison). Assumes all observed labels are terminal"
     )
     parser.add_argument(
         "-i", "--input", required=True,
@@ -342,7 +458,17 @@ def main():
                         help="ete3 newick format integer. Default: 1.")
     parser.add_argument(
         "--num_iter", type=int, default=100,
-        help="Maximum LBFGS outer iterations. Default: 100.",
+        help="Maximum LBFGS outer iterations per restart. Default: 100.",
+    )
+    parser.add_argument(
+        "--num_restarts", type=int, default=1,
+        help="Number of random restarts. Restart 0 is deterministic; subsequent "
+             "restarts use random hidden-state initialisations to escape local minima. "
+             "Default: 1 (no restarts).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Master random seed for restart initialisations. Default: 0.",
     )
     args = parser.parse_args()
 
@@ -354,7 +480,8 @@ def main():
     logger.info("Loading trees from %s", args.input)
     trees = load_trees(args.input, newick_format=args.newick_format)
     logger.info("Loaded %d trees", len(trees))
-
+    
+    # NOTE: All observed labels are treated as terminals
     terminal_labels = detect_labels(trees)
     n_obs    = len(terminal_labels)
     n_states = n_obs + args.num_hidden
@@ -381,6 +508,7 @@ def main():
         _llh, neg_llh = run_mle(
             trees_labeled, n_states, device, args.output_dir, model_info,
             args.sampling_probability, l1_reg=args.l1, num_iter=args.num_iter,
+            num_restarts=args.num_restarts, seed=args.seed,
         )
     except Exception as e:
         logger.error("Inference failed: %s", e, exc_info=True)
