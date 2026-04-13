@@ -277,9 +277,13 @@ def _run_one_restart(
 
     def closure():
         optimizer.zero_grad()
-        if llh.pi_params.requires_grad:
-            with torch.no_grad():
-                llh.pi_params.clamp_(-500.0, 500.0)
+        with torch.no_grad():
+            if llh.pi_params.requires_grad:
+                llh.pi_params.clamp_(-100.0, 100.0)
+            # Clamp growth_params so the actual growth rate (softplus output)
+            # stays <= ~10, preventing the E-ODE from becoming stiff when
+            # random restarts push λ to extreme values.
+            llh.growth_params.clamp_(max=50.0, min=-10.0)
         llh.precompute_ode()
         obj = _objective()
         if not torch.isfinite(obj):
