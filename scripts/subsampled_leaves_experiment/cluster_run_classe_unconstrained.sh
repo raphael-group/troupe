@@ -17,6 +17,9 @@ set -euo pipefail
 #   BACKEND=vector_transport SBATCH_TIME=1-00:00:00 SBATCH_MEM=32G \
 #     bash scripts/subsampled_leaves_experiment/cluster_run_classe_unconstrained.sh
 #
+#   NUM_RESTARTS=3 SBATCH_TIME=12:00:00 \
+#     bash scripts/subsampled_leaves_experiment/cluster_run_classe_unconstrained.sh
+#
 # Dataset layout (same as TROUPE experiment):
 #   <EXPERIMENT_ROOT>/trees_<n>/time_<t>/sample_<p>/trial_<k>/trees.pkl
 # Results written to:
@@ -36,6 +39,8 @@ VENV_ACTIVATE="${VENV_ACTIVATE:-}"
 NUM_HIDDEN_VALUES="${NUM_HIDDEN_VALUES:-4}"
 # L1 regularisation on off-diagonal birth-kernel entries (default: none).
 L1="${L1:-0.0}"
+# Number of random restarts per job (restart 0 is deterministic).
+NUM_RESTARTS="${NUM_RESTARTS:-1}"
 DEVICE="${DEVICE:-cpu}"
 UNCONSTRAINED_EXTRA_ARGS="${UNCONSTRAINED_EXTRA_ARGS:-}"
 
@@ -135,6 +140,7 @@ run_one_job() {
         "-o"  "${outdir}"
         "--sampling_probability" "${sampling_prob}"
         "--num_hidden"           "${num_hidden}"
+        "--num_restarts"         "${NUM_RESTARTS}"
         "--l1"                   "${L1}"
         "--device"               "${DEVICE}"
         "--backend"              "${BACKEND}"
@@ -277,7 +283,7 @@ submit_jobs() {
 
     # Export all runtime config so array tasks inherit it.
     export WORKDIR PYTHON_BIN VENV_ACTIVATE BACKEND
-    export NUM_HIDDEN_VALUES L1 DEVICE UNCONSTRAINED_EXTRA_ARGS SKIP_EXISTING
+    export NUM_HIDDEN_VALUES L1 NUM_RESTARTS DEVICE UNCONSTRAINED_EXTRA_ARGS SKIP_EXISTING
 
     if [[ "${DRY_RUN}" == "1" ]]; then
         printf 'DRY RUN: would submit array of %d tasks\n' "${n_jobs}"
