@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash scripts/subsampled_leaves_experiment/cluster_run_classe_unconstrained.sh
 #
 # Common overrides:
-#   NUM_HIDDEN_VALUES="0 1 2 4" TREE_COUNTS="8" SBATCH_TIME=6:00:00 \
+#   TREE_COUNTS="64" TRIALS="0" SAMPLE_PROBS="0.2" \
 #     bash scripts/subsampled_leaves_experiment/cluster_run_classe_unconstrained.sh
 #
 #   DRY_RUN=1 \
@@ -33,7 +33,7 @@ PYTHON_BIN="${PYTHON_BIN:-${WORKDIR}/../.venv/bin/python}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-}"
 
 # Space-delimited list of hidden-state counts to evaluate per dataset.
-NUM_HIDDEN_VALUES="${NUM_HIDDEN_VALUES:-0 1 2 3 4 5}"
+NUM_HIDDEN_VALUES="${NUM_HIDDEN_VALUES:-4}"
 # L1 regularisation on off-diagonal birth-kernel entries (default: none).
 L1="${L1:-0.0}"
 DEVICE="${DEVICE:-cpu}"
@@ -42,15 +42,15 @@ UNCONSTRAINED_EXTRA_ARGS="${UNCONSTRAINED_EXTRA_ARGS:-}"
 # Filters: space-delimited lists; leave empty to include all.
 TREE_COUNTS="${TREE_COUNTS:-}"
 PROCESS_TIMES="${PROCESS_TIMES:-}"
-SAMPLE_PROBS="${SAMPLE_PROBS:-}"
-TRIALS="${TRIALS:-0 1 2 3 4 5 6 7 8 9}"
+SAMPLE_PROBS="${SAMPLE_PROBS:-0.05 0.1 0.2}"
+TRIALS="${TRIALS:-}"
 
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 JOB_NAME_PREFIX="${JOB_NAME_PREFIX:-uncon}"
 
 SBATCH_TIME="${SBATCH_TIME:-6:00:00}"
-SBATCH_CPUS="${SBATCH_CPUS:-4}"
+SBATCH_CPUS="${SBATCH_CPUS:-2}"
 SBATCH_MEM="${SBATCH_MEM:-16G}"
 SBATCH_PARTITION="${SBATCH_PARTITION:-}"
 SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-}"

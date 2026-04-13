@@ -228,13 +228,14 @@ def run_mle(
 
     def closure():
         optimizer.zero_grad()
+        # NOTE: Let's not do this because it can hide other issues...
         # Clamp pi_params before every forward pass (including inside LBFGS
         # line-search evaluations).  When start_state=None the root logits are
         # free; with a flat likelihood in that direction LBFGS can step them
         # past 700, causing exp() to overflow to +inf.
-        if llh.pi_params.requires_grad:
-            with torch.no_grad():
-                llh.pi_params.clamp_(-500.0, 500.0)
+        # if llh.pi_params.requires_grad:
+        #     with torch.no_grad():
+        #         llh.pi_params.clamp_(-500.0, 500.0)
         llh.precompute_ode()
         obj = _objective()
         if not torch.isfinite(obj):
