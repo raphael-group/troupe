@@ -13,7 +13,7 @@ NOTE: This assumes that all observed states are terminal states.
 
 Usage:
     python scripts/run_classe_unconstrained.py \
-        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves_4_terminals/trees_32/time_5.0/sample_0.1/trial_0/trees.pkl \
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/subsampled_leaves_4_terminals/trees_64/time_5.0/sample_0.1/trial_0/trees.pkl \
         -o tmp/unconstrained \
         --num_hidden 4 \
         --sampling_probability 0.1 \
@@ -87,6 +87,7 @@ def _make_bk_params_init(
         start_state:   Integer index of the root state (pi fixed here), or None.
     """
     obs_sorted = sorted(observed_idxs)
+    idxs = list(range(n_states))
     n_obs = len(obs_sorted)
     bk = torch.empty(n_states, n_states, device=device, dtype=dtype)
 
@@ -109,8 +110,9 @@ def _make_bk_params_init(
             # Random subset assignment: hidden state i specialises toward a
             # random subset of k terminals, with ~0.9 mass inside the subset
             # and ~0.1 spread over the remaining n_states - k entries.
-            k = int(rng.integers(1, n_obs))
-            subset = set(rng.choice(obs_sorted, size=k, replace=False).tolist())
+            allowable_idxs = [idx for idx in idxs if idx in observed_idxs or idx >= i]
+            k = int(rng.integers(1, len(allowable_idxs)))
+            subset = set(rng.choice(allowable_idxs, size=k, replace=False).tolist())
             n_other = max(n_states - k, 1)
             row = torch.full((n_states,), 0.1 / n_other, device=device, dtype=dtype)
             for j in subset:
@@ -228,7 +230,7 @@ def _run_one_restart(
     num_iter: int,
     log_iter: int,
 ) -> tuple:
-    """Run a single LBFGS optimisation from a given birth-kernel initialisation.
+    """Run LBFGS from a given birth-kernel initialisation.
 
     Returns (llh_model, neg_log_likelihood).
     """
@@ -255,6 +257,7 @@ def _run_one_restart(
     )
 
     tree_idxs = list(range(len(trees_labeled)))
+
     optimizer = optim.LBFGS(
         [p for p in llh.parameters() if p.requires_grad],
         lr=1.0, max_iter=1, max_eval=20, line_search_fn="strong_wolfe",
@@ -356,7 +359,7 @@ def run_mle(
       - Observed states: 0.75 self-replication, 0.25 uniform over the rest.
       - Hidden states:   0.25 self-replication, 0.75 uniform over the rest.
 
-    Restarts 1 … num_restarts-1 use random initialisations designed to break
+    Restarts 1 ... num_restarts-1 use random initialisations designed to break
     the symmetry that causes hidden states to collapse to identical rows:
       - Observed states: same deterministic 0.75 self-replication.
       - Hidden states: each row concentrates ~0.75 mass on a distinct random
@@ -398,14 +401,21 @@ def run_mle(
 
         if neg_llh < best_neg_llh:
             best_neg_llh = neg_llh
+            # Free the previous best model before storing the new one so that
+            # at most one completed model is alive between restarts.
+            best_llh = None
             best_llh = llh
-            # Copy best restart's artefacts to the top-level output_dir.
+            # Copy best restart's artifacts to the top-level output_dir.
             os.makedirs(output_dir, exist_ok=True)
             import shutil
             for fname in ("state_dict.pth", "model_dict.pkl"):
                 src = os.path.join(restart_dir, fname)
                 if os.path.isfile(src):
                     shutil.copy2(src, os.path.join(output_dir, fname))
+        else:
+            # Not the best - discard immediately so it doesn't persist until
+            # the next iteration overwrites `llh`.
+            del llh
 
     if best_llh is None:
         raise RuntimeError("All restarts failed.")
