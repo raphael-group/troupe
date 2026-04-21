@@ -36,6 +36,12 @@ Example usage:
         -o tmp/c_elegans_subsample_ABa \
         --regularizations 100 10 1 0.1 0.01 0.001 \
         --sampling_probability 0.35
+
+    python scripts/run_classe_troupe.py \
+        -i /Users/william_hs/Desktop/Projects/troupe/experiments/c_elegans/packer/processed_data/10/0.5/trees.pkl \
+        -o tmp/c_elegans_subsample_ABa \
+        --regularizations 100 10 1 0.1 0.01 0.001 \
+        --sampling_probability 0.35
 """
 
 import argparse
