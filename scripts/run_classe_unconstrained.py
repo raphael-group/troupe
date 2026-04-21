@@ -32,6 +32,7 @@ import time
 
 import torch
 import torch.optim as optim
+import numpy as np
 from ete3 import Tree
 
 from classe_model import ClaSSELikelihoodModel
@@ -65,8 +66,6 @@ def _make_bk_params_init(
     start_state=None,
 ) -> torch.Tensor:
     """Return initial birth-kernel logits as an (n_states, n_states) tensor.
-
-    Observed state rows use a fixed 0.75 self-replication bias.
 
     The start_state row (the root whose pi is a fixed point mass) is always
     initialised to uniform — i.e. zeros, so softmax gives 1/n_states.  This
@@ -361,15 +360,11 @@ def run_mle(
     """Fit unconstrained ClaSSE via LBFGS with optional random restarts.
 
     Restart 0 uses a deterministic initialisation:
-      - Observed states: 0.75 self-replication, 0.25 uniform over the rest.
-      - Hidden states:   0.25 self-replication, 0.75 uniform over the rest.
+      - Observed states: 0.9 self-replication, 0.1 uniform over the rest.
+      - Hidden states:   0.1 self-replication, 0.9 uniform over the rest.
 
     Restarts 1 ... num_restarts-1 use random initialisations designed to break
-    the symmetry that causes hidden states to collapse to identical rows:
-      - Observed states: same deterministic 0.75 self-replication.
-      - Hidden states: each row concentrates ~0.75 mass on a distinct random
-        subset of terminal states, seeding the optimizer at different vertices
-        of the probability simplex.
+    the symmetry that causes hidden states to collapse to identical rows.
 
     The best solution across all restarts (lowest neg-llh) is written to
     output_dir and returned.
@@ -382,7 +377,6 @@ def run_mle(
     best_llh  = None
     best_neg_llh = float("inf")
 
-    import numpy as np
     rng_master = np.random.default_rng(seed)
 
     for r in range(num_restarts):
