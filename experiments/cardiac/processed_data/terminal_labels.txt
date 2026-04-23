@@ -1,0 +1,8 @@
+Node&Notochordal_plate
+Endo
+PS
+Anterior_meso
+Neural
+PSM
+Epiblast
+Somites_sclerotome

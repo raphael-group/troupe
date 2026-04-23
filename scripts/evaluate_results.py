@@ -1759,6 +1759,9 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
     Usage example:
         python scripts/evaluate_results.py plot-differentiation-maps \
             -i $PWD/tmp/c_elegans_subsample_ABa
+
+        python scripts/evaluate_results.py plot-differentiation-maps \
+            -i $PWD/results/cardiac/sample_0.5
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)

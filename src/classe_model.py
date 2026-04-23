@@ -462,9 +462,9 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
             return torch.eye(K, device=self.device, dtype=dtype).unsqueeze(0)
 
         # Midpoint E and derived quantities for each interval.
-        E_mid = (E_vals[:-1] + E_vals[1:]) / 2          # (T-1, K)
-        q_mid = E_mid @ B.T                               # (T-1, K)
-        dts = time_grid[1:] - time_grid[:-1]              # (T-1,)
+        E_mid = (E_vals[:-1] + E_vals[1:]) / 2              # (T-1, K)
+        q_mid = E_mid @ B.T                                 # (T-1, K)
+        dts = time_grid[1:] - time_grid[:-1]                # (T-1,)
 
         # Build A at each midpoint in one vectorised operation: (T-1, K, K)
         A_mid = (
