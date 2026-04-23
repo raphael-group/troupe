@@ -650,7 +650,7 @@ def auto_observed_potencies(terminal_labels):
 # 4. Generate potency sets
 # ---------------------------------------------------------------------------
 
-def generate_potency_sets(trees, terminal_labels, observed_potencies, max_hidden):
+def generate_potency_sets(trees, terminal_labels, observed_potencies, max_hidden, tree_potency_only=False):
     """Generate candidate potency sets from tree clades."""
     terminal_set = set(terminal_labels)
 
@@ -671,17 +671,18 @@ def generate_potency_sets(trees, terminal_labels, observed_potencies, max_hidden
     logger.info("Trees have %d induced clades", len(induced_potencies))
 
     potencies_to_add = set()
-    for potency in induced_potencies:
-        # NOTE: A node cannot have a potency set that is smaller than what was observed
-        # if len(potency) > 1:
-        #     for state in potency:
-        #         sub = list(potency)
-        #         sub.remove(state)
-        #         potencies_to_add.add(tuple(sub))
-        for state in terminal_labels:
-            if state not in potency:
-                sup = sorted(list(potency) + [state])
-                potencies_to_add.add(tuple(sup))
+    if not tree_potency_only:
+        for potency in induced_potencies:
+            # NOTE: A node cannot have a potency set that is smaller than what was observed
+            # if len(potency) > 1:
+            #     for state in potency:
+            #         sub = list(potency)
+            #         sub.remove(state)
+            #         potencies_to_add.add(tuple(sub))
+            for state in terminal_labels:
+                if state not in potency:
+                    sup = sorted(list(potency) + [state])
+                    potencies_to_add.add(tuple(sup))
 
     all_potencies = induced_potencies | potencies_to_add
 
@@ -1254,6 +1255,10 @@ def main():
         "--model_selection_only", action="store_true",
         help="Skip Phase 1/2 and run model selection using existing reg=<value> folders in output_dir",
     )
+    parser.add_argument(
+        "--tree_potency_only", action="store_true",
+        help="only use observed potencies for candidate set of potencies",
+    )
     args = parser.parse_args()
 
     if not (0 < args.sampling_probability <= 1.0):
@@ -1316,7 +1321,7 @@ def main():
     # --- Generate potency sets ---
     logger.info("Generating potency sets...")
     potency_sets = generate_potency_sets(
-        trees, terminal_labels, observed_potencies, args.max_hidden_states
+        trees, terminal_labels, observed_potencies, args.max_hidden_states, args.tree_potency_only
     )
     num_hidden = len(potency_sets) - len(observed_potencies)
     num_obs = len(states)

@@ -65,8 +65,12 @@ class ClaSSEVectorTransportCache:
             V_active = self._rk4_step(V.index_select(1, active_cols), interval_idx).clamp_min(EPS)
             col_scales = V_active.max(dim=0).values.clamp_min(EPS)
             V_active = V_active / col_scales.unsqueeze(0)
-            V[:, active_cols] = V_active
-            log_scales[active_cols] = log_scales[active_cols] + torch.log(col_scales)
+            # Avoid in-place writes on autograd-tracked tensors: the transported
+            # columns originate from exp(work_logs - log_scales), and mutating
+            # them in place breaks backward through ExpBackward0.
+            V = V.index_copy(1, active_cols, V_active)
+            updated_scales = log_scales.index_select(0, active_cols) + torch.log(col_scales)
+            log_scales = log_scales.index_copy(0, active_cols, updated_scales)
 
         out[finite_mask] = torch.log(V.transpose(0, 1).clamp_min(EPS)) + log_scales.unsqueeze(1)
         return out
