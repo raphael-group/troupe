@@ -1,10 +1,7 @@
-NMPs	Neural,Somites_sclerotome
-Node&Notochordal_plate	Node&Notochordal_plate
+Somites_sclerotome	Somites_sclerotome
+Neural	Neural
 Endo	Endo
-PS	PS
+Epiblast	Epiblast
+Endothelial	Endothelial
 Meso1	Anterior_meso,Somites_sclerotome
 Anterior_meso	Anterior_meso
-Neural	Neural
-PSM	PSM
-Epiblast	Epiblast
-Somites_sclerotome	Somites_sclerotome
