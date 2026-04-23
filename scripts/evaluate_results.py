@@ -1214,40 +1214,90 @@ def draw_true_graph():
     # rate_matrix_num = 13
     # terminal_idxs = [0, 1, 2, 3]
 
+    terminal_idxs = [4, 5, 6, 7]
+    base_dir = "/n/fs/ragr-research/users/wh8114/projects/troupe/"
+    working_dir = f"{base_dir}/experiments/subsampled_leaves_4_terminals"
+    model_dict_path = f"{working_dir}/model.json"
+
     idx2color = {idx: color_list[i] for i, idx in enumerate(terminal_idxs)}
-    idx2state = {i: str(i) for i in terminal_idxs}
+    idx2state = {i: str(i) for i in range(8)}
     state2idx = {state: idx for idx, state in idx2state.items()}
-    working_dir = f"{base_dir}/scripts/model_params"
-    model_dict_path = f"{working_dir}/rate_matrix_{rate_matrix_num}.json"
+    # working_dir = f"{base_dir}/scripts/model_params"
+    # model_dict_path = f"{working_dir}/rate_matrix_{rate_matrix_num}.json"
     with open(model_dict_path, "r") as fp:
         model_dict = json.load(fp)
-        rate_matrix = np.array(model_dict["rate_matrix"])
+        rate_matrix = np.array(model_dict["birth_kernel"])
+        for i in range(len(idx2color)):
+            rate_matrix[i, i] = 0
         root_distribution = np.array(model_dict["init_distribution"])
         growth_rates = np.array(model_dict["growth_rates"])
 
-    num_hidden_states = len(rate_matrix)-len(terminal_idxs)
+    # node_labels = {i: str(idx2state[i]) for i in idx2state.keys()}
+    # node_colors = {idx2state[idx]: idx2color[idx] for idx in terminal_idxs}
+    # for idx in range(len(rate_matrix)):
+    #     if idx not in terminal_idxs:
+    #         label = ""
+    #         node_colors[label] = "#FFFFFF"   # White
+    #         node_labels[idx] = label
+    # state2potency = get_idx2potency(rate_matrix, tree_length=10)
 
-    node_labels = {i: str(idx2state[i]) for i in idx2state.keys()}
-    node_colors = {idx2state[idx]: idx2color[idx] for idx in terminal_idxs}
+    # inferred_output_path = f"{working_dir}/rate_matrix_{rate_matrix_num}.pdf"
+    # starting_idx = np.argmax(root_distribution).item()
+    # thresh = 0.0
+    # draw_weighted_graph(rate_matrix,
+    #                     inferred_output_path,
+    #                     thresh,
+    #                     node_labels,
+    #                     node_colors,
+    #                     totipotent_state=starting_idx,
+    #                     self_edges=growth_rates,
+    #                     state2potency=state2potency,
+    #                     no_node_labels=False)
+    starting_idx = np.argmax(root_distribution)
+
+    # Build node labels and colors
+    node_labels = {i: str(idx2state[i]) for i in idx2state}
+    node_colors = {}
+    terminal_color_idx = 0
+    for idx in sorted(idx2state.keys()):
+        state = str(idx2state[idx])
+        if idx in terminal_idxs:
+            node_colors[state] = color_list[terminal_color_idx % len(color_list)]
+            terminal_color_idx += 1
+        else:
+            node_colors[state] = '#FFFFFF'
+
+    idx2potency = {}
     for idx in range(len(rate_matrix)):
-        if idx not in terminal_idxs:
-            label = ""
-            node_colors[label] = "#FFFFFF"   # White
-            node_labels[idx] = label
-    state2potency = get_idx2potency(rate_matrix, tree_length=10)
+        reachable_idxs = get_reachable_idxs(rate_matrix, idx, 0.01)
+        potency = [idx2state[_idx] for _idx in reachable_idxs]
+        potency.sort()
+        idx2potency[idx] = tuple(potency)
 
-    inferred_output_path = f"{working_dir}/rate_matrix_{rate_matrix_num}.pdf"
-    starting_idx = np.argmax(root_distribution).item()
-    thresh = 0.0
-    draw_weighted_graph(rate_matrix,
-                        inferred_output_path,
-                        thresh,
-                        node_labels,
-                        node_colors,
-                        totipotent_state=starting_idx,
-                        self_edges=growth_rates,
-                        state2potency=state2potency,
-                        no_node_labels=True)
+    # Build state2potency for wedge coloring. Prefer the saved reduced
+    # potency map when available; it is the authoritative Phase 2 result
+    # for ClaSSE models and preserves observed non-terminal aliases.
+    state2potency_filtered = _build_plot_state2potency(idx2state, idx2potency, terminal_idxs)
+    if idx2potency is None:
+        state2potency = get_idx2potency(rate_matrix, is_daughter_kernel="daughter_kernel" in model_dict)
+        for idx, potency in state2potency.items():
+            filtered = [s for s in potency if s in terminal_idxs]
+            if filtered:
+                filtered.sort()
+                state2potency_filtered[idx] = tuple(filtered)
+
+    draw_weighted_graph(
+        rate_matrix,
+        f"{working_dir}/rate_matrix_{rate_matrix_num}.pdf",
+        0.02,
+        node_labels,
+        node_colors,
+        totipotent_state=starting_idx,
+        self_edges=growth_rates,
+        state2potency=state2potency_filtered,
+        terminal_idxs=terminal_idxs if terminal_idxs else None,
+        scale_by_transitions="daughter_kernel" in model_dict
+    )
     
 @cli.command()
 def get_experiment_potencies():
