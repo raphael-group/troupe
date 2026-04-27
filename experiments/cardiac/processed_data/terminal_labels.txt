@@ -1,6 +1,8 @@
-Somites_sclerotome
-Neural
-Endo
 Epiblast
-Endothelial
 Anterior_meso
+Endothelial
+PSM
+Neural
+Node&Notochordal_plate
+Somites_sclerotome
+Endo
