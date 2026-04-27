@@ -120,7 +120,7 @@ batches_to_include = [
     'AZ132'
 ]
 
-times_to_include = [96] #, 120, 144, 168]
+times_to_include = [168] # [96] #, 120, 144, 168]
 
 types_to_remove = [
     'low_quality'
