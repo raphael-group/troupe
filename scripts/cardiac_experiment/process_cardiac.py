@@ -83,7 +83,7 @@ label2coarse = {
     'Hindgut': 'Endo',
     'Foregut': 'Endo',
     'PSM': 'PSM',
-    'Somites': 'Somites',
+    'Somites': 'Somites_sclerotome', # 'Somites'
     'Somites_sclerotome': 'Somites_sclerotome',
     'Meso1': 'Meso1',
     'Meso4': 'Anterior_meso', #'Meso4',
@@ -117,7 +117,9 @@ potencies = {
 }
 
 batches_to_include = [
-    'AZ132'
+    # 'AZ132', # 168
+    'AZ92_3' # 168,
+    # 'AZ132' # 120
 ]
 
 times_to_include = [168] # [96] #, 120, 144, 168]
@@ -137,8 +139,13 @@ def main():
         batch = name_arr[0]
         num = name_arr[1]
 
-        if batch not in batches_to_include:
+        batch_name = f"{batch}_{num}"
+
+        if batch_name not in batches_to_include:
             continue
+
+        # if batch not in batches_to_include:
+        #     continue
 
         with open(f"{tree_dir}/{entry}", "r") as fp:
             nwk = fp.readline()
@@ -161,16 +168,18 @@ def main():
 
         tree = ete3.Tree(nwk, format=3)
 
+        print("Tree!")
+
         known_leaves = []
         leaves = tree.get_leaves()
         for leaf in leaves:
             cell_label = leaf2label[leaf.name]
-            cell_label_coarse = label2coarse[cell_label]
-            leaf.add_feature("state", cell_label_coarse)
-            
             # Apply coarse labeling
-            if cell_label in types_to_remove:
+            cell_label_coarse = label2coarse[cell_label]
+            if cell_label_coarse in types_to_remove:
                 continue
+            leaf.add_feature("state", cell_label_coarse)
+        
             observed_types.add(leaf.state)
             known_leaves.append(leaf)
            
@@ -183,7 +192,7 @@ def main():
         assert crown_dist_post_prune == crown_dist_pre_prune
 
         root_children = tree.get_children() #[0].get_children()
-        print(f"Tree {batch}-{num} has {len(root_children)}-way multifurcation at root")
+        print(f"Tree {batch}_{num} has {len(root_children)}-way multifurcation at root")
         multifurcation_distirbution = Counter()
         for node in tree.traverse():
             if not node.is_leaf() and not node.is_root():
