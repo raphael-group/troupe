@@ -8,7 +8,8 @@ python scripts/run_classe_troupe.py \
     --sampling_probability $SAMPLE_P \
     --terminal_labels $PWD/experiments/cardiac/processed_data/terminal_labels.txt \
     --observed_potencies $PWD/experiments/cardiac/processed_data/observed_potencies.txt \
-    --reachability_threshold 1e-4
+    --reachability_threshold 1e-4 \
+    --tree_potency_only
 
 # # Uncomment later...
 # # New as of 4/2 12:00: Group LASSO

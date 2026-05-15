@@ -118,11 +118,11 @@ potencies = {
 
 batches_to_include = [
     # 'AZ132', # 168
-    'AZ92_3' # 168,
-    # 'AZ132' # 120
+    # 'AZ92_3' # 168,
+    'AZ132_2' # 120
 ]
 
-times_to_include = [168] # [96] #, 120, 144, 168]
+times_to_include = [120] # [168] # [96] #, 120, 144, 168]
 
 types_to_remove = [
     'low_quality'

@@ -1218,7 +1218,7 @@ def main():
         help="Max hidden states for potency generation",
     )
     parser.add_argument(
-        "--debiasing_l1", type=float, default=0.0001,
+        "--debiasing_l1", type=float, default=0.001,
         help="Regularization strength for Phase 2 (debiasing)",
     )
     parser.add_argument(
@@ -1227,7 +1227,7 @@ def main():
         help="Penalty family for Phase 2 regularization",
     )
     parser.add_argument(
-        "--reachability_threshold", type=float, default=0.0001,
+        "--reachability_threshold", type=float, default=0.001,
         help="Threshold for get_reachable_idxs",
     )
     parser.add_argument(

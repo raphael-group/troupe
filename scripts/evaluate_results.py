@@ -1789,13 +1789,13 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
         # potency map when available; it is the authoritative Phase 2 result
         # for ClaSSE models and preserves observed non-terminal aliases.
         state2potency_filtered = _build_plot_state2potency(idx2state, idx2potency, terminal_idxs)
-        if idx2potency is None:
-            state2potency = get_idx2potency(rate_matrix, is_daughter_kernel="daughter_kernel" in model_dict)
-            for idx, potency in state2potency.items():
-                filtered = [s for s in potency if s in terminal_idxs]
-                if filtered:
-                    filtered.sort()
-                    state2potency_filtered[idx] = tuple(filtered)
+        # if idx2potency is None:
+        state2potency = get_idx2potency(rate_matrix, is_daughter_kernel="daughter_kernel" in model_dict, eps=thresh)
+        for idx, potency in state2potency.items():
+            filtered = [s for s in potency if s in terminal_idxs]
+            if filtered:
+                filtered.sort()
+                state2potency_filtered[idx] = tuple(filtered)
 
         # Output
         figure_dir = os.path.join(model_dir, 'figures')
