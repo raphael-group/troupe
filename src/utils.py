@@ -122,12 +122,10 @@ def get_idx2potency(rate_matrix, eps=1e-4, tree_length=1.0, is_daughter_kernel=F
     print(transition_matrix)
 
     n = len(transition_matrix)
+    # NOTE: This is incorrect... need to do BFS
     idx2list = {}
     for row in range(n):
-        idx2list[row] = []
-        for col in range(n):
-            if transition_matrix[row, col] > eps:
-                idx2list[row].append(col)
+        idx2list[row] = get_reachable_idxs(transition_matrix, starting_state=row, threshold=eps)
 
     potency_map = {idx: tuple(sorted(potency)) for idx, potency in idx2list.items()}
     return potency_map

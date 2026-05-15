@@ -1,5 +1,6 @@
 # Tree-informed Rate Optimization Using Potency Enforcement (TROUPE)
 
+
 This reposiotry is a part of an in-review paper titled *Inferring Cell Differentiation Dynamics with Unobserved Progenitors* by William Howard-Snyder, Richard Zhang, Henri Schmidt, Michelle Chan, and Ben Raphael.
 It contains our implementation for Tree-informed Rate Optimization Using Potency Enforcement (TROUPE) as well as code to simulate data and run experiments.
 
