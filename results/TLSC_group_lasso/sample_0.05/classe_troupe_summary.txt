@@ -1,0 +1,16 @@
+best_reg	10.0
+best_model_dir	/Users/william_hs/Desktop/Projects/troupe/results/TLSC_group_lasso/sample_0.05/reg=10.0/select_potencies
+knee_num_states	7
+knee_loss	918.2066491367161
+sampling_probability	0.05
+num_regularizations_tested	7
+
+All results:
+reg	num_states	neg_llh
+0.1	9	923.4008596953339
+0.3	9	895.8541244623732
+1.0	8	921.963853496107
+3.0	7	941.1711500636122
+10.0	7	918.2066491367161
+30.0	6	981.341575312361
+100.0	6	981.7842720344715
