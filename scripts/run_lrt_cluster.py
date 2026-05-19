@@ -13,8 +13,8 @@ Three-step workflow:
     python scripts/run_lrt_cluster.py prepare \\
         -i experiments/TLSC/processed_data/trees.pkl \\
         --model results/TLSC/sample_0.05/best_model_dict.pkl \\
-        --constraint "B[NMPs,NeuralTube] >= 2.5 * B[NMPs,Somite]" \\
-        --sampling_prob 0.05 --B 99 \\
+        --constraint "B[NMPs,NeuralTube] >= 5.5 * B[NMPs,Somite]" \\
+        --sampling_prob 0.05 --B 199 \\
         --output experiments/TLSC/lrt/nmp_neuraltube_somite
 
   Step 2 — submit (one command):
