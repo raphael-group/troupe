@@ -4,9 +4,10 @@ Simulates cell tree according to a pure-birth process.
 Example usage:
     python scripts/simulate_data.py \
     -b 5 \
-    -t 2.35 \
-    -v 12 \
-    -n 512
+    -t 2 \
+    -n 128 \
+    -c \
+    -o /Users/william_hs/Desktop/Projects/test_troupe_sim/troupe/experiments/test
 
 Each simulated tree is saved to the following file:
     simulated_data/branching_process_experiment/<rate-matrix-idx>/<num-trees>/<num-leaves>/<trials-num>/trees.pkl
@@ -22,8 +23,8 @@ from scipy.linalg import expm
 import warnings
 
 import numpy as np
-# from branching_simulation import simulate_tree
-from classe_branching_simulation import simulate_tree
+from branching_simulation import simulate_tree as simulate_ctmc_tree
+from classe_branching_simulation import simulate_tree as simulate_classe_tree
 
 def main():
     parser = argparse.ArgumentParser(
@@ -63,6 +64,11 @@ def main():
         action="store_true",
         help="Determines whether to prune progenitor types (after subsampling)."
     )
+    parser.add_argument(
+        "-c", "--ctmc_simulator",
+        action="store_true",
+        help="Determines whether you want to simulate with CTMC transitions on the edges."
+    )
     args = parser.parse_args()
 
     input_path = f"{args.out_dir}/model.json"
@@ -71,12 +77,15 @@ def main():
 
     with open(input_path, 'r') as f:
         data_dict = json.load(f)
-    birth_kernel = np.array(data_dict["birth_kernel"])
+
+    if args.ctmc_simulator:
+        transition_matrix = np.array(data_dict["rate_matrix"])
+        terminals = [str(i) for i in range(len(transition_matrix)) if transition_matrix[i,i] == 0.0]
+    else:
+        transition_matrix = np.array(data_dict["birth_kernel"])
+        terminals = [str(i) for i in range(len(transition_matrix)) if transition_matrix[i,i] == 1.0]
     growth_rates = np.array(data_dict["growth_rates"])
     init_distribution = np.array(data_dict["init_distribution"])
-
-
-    terminals = [str(i) for i in range(len(birth_kernel)) if birth_kernel[i,i] == 1.0]
 
     # Each simulation needs a different seed
     num_seeds = args.num_trees * args.num_trials
@@ -92,13 +101,20 @@ def main():
         num_progenitors_removed = []
         for j in range(args.num_trees):
             seed = seeds[j + trial * args.num_trees]
-
-            tree = simulate_tree(birth_kernel,
-                                growth_rates,
-                                np.argmax(init_distribution),
-                                T=args.time,
-                                seed=seed,
-                                sample_probability=args.sample_probability)
+            
+            if args.ctmc_simulator:
+                tree = simulate_ctmc_tree(transition_matrix,
+                                            growth_rates,
+                                            np.argmax(init_distribution).item(),
+                                            T=args.time,
+                                            seed=seed)
+            else:
+                tree = simulate_classe_tree(transition_matrix,
+                                            growth_rates,
+                                            np.argmax(init_distribution).item(),
+                                            T=args.time,
+                                            seed=seed,
+                                            sample_probability=args.sample_probability)
 
             if tree is None:
                 continue
@@ -155,7 +171,8 @@ def main():
         print(f"\tmax depth:      {max(clone_depth)}")
         print(f"\ttype counts:    {OrderedDict(total_type_counts)}")
         print(f"\ttype comp:      {leaf_composition}")
-        print(f"\tremoved prog:   {sum(num_progenitors_removed) / len(num_progenitors_removed)} per tree")
+        if len(num_progenitors_removed) > 0:
+            print(f"\tremoved prog:   {sum(num_progenitors_removed) / len(num_progenitors_removed)} per tree")
         print()
 
 
