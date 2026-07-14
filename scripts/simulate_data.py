@@ -3,13 +3,11 @@ Simulates cell tree according to a pure-birth process.
 
 Example usage:
     python scripts/simulate_data.py \
-    -b 5 \
-    -t 2.35 \
-    -v 12 \
-    -n 512
-
-Each simulated tree is saved to the following file:
-    simulated_data/branching_process_experiment/<rate-matrix-idx>/<num-trees>/<num-leaves>/<trials-num>/trees.pkl
+    -b 10 \
+    -t 1.0 \
+    -n 12 \
+    -o /Users/william_hs/Desktop/Projects/troupe/experiments/sim_TLS \
+    -s 0.05
 """
 
 import argparse
@@ -155,7 +153,8 @@ def main():
         print(f"\tmax depth:      {max(clone_depth)}")
         print(f"\ttype counts:    {OrderedDict(total_type_counts)}")
         print(f"\ttype comp:      {leaf_composition}")
-        print(f"\tremoved prog:   {sum(num_progenitors_removed) / len(num_progenitors_removed)} per tree")
+        if len(num_progenitors_removed) > 0:
+            print(f"\tremoved prog:   {sum(num_progenitors_removed) / len(num_progenitors_removed)} per tree")
         print()
 
 
