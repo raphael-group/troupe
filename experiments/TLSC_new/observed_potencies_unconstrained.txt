@@ -1,0 +1,5 @@
+NeuralTube	NeuralTube,Somite,PCGLC,Endoderm
+Somite	NeuralTube,Somite,PCGLC,Endoderm
+Endoderm	NeuralTube,Somite,PCGLC,Endoderm
+PCGLC	NeuralTube,Somite,PCGLC,Endoderm
+NMPs	NeuralTube,Somite,PCGLC,Endoderm

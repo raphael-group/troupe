@@ -1,0 +1,8 @@
+NeuralTube	NeuralTube
+Somite	Somite
+Endoderm	Endoderm
+PCGLC	PCGLC
+NMPs	NeuralTube,Somite
+U6	Endoderm,NeuralTube,Somite
+U7	NeuralTube,PCGLC,Somite
+U8	Endoderm,NeuralTube,PCGLC,Somite
