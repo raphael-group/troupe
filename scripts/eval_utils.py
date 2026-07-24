@@ -2,6 +2,7 @@ import os
 import numpy as np
 from collections import defaultdict, deque
 from graphviz import Digraph
+import matplotlib.pyplot as plt
 
 
 def _augment_edges_for_required_nodes(adj_matrix, edges, required_nodes, active_nodes=None):
@@ -44,6 +45,71 @@ def _augment_edges_for_required_nodes(adj_matrix, edges, required_nodes, active_
 
     return augmented_edges, nodes
 
+
+def compute_active_graph(adj_matrix, threshold=0, totipotent_state=None,
+                          terminal_idxs=None, self_edges=None):
+    """Compute the pruned node/edge set used for plotting.
+
+    Mirrors the reachability pruning performed by ``draw_weighted_graph`` so
+    that other plots (e.g., growth-rate bar charts) can be restricted to
+    exactly the same set of active states.
+
+    Inputs
+        adj_matrix:        Numpy adjacency matrix.
+        threshold:          Set all edges below this value to 0
+        totipotent_state:   Starting state
+        terminal_idxs:      Row idxs of terminal states
+        self_edges:         Optional self-edge weights (e.g., growth rates)
+
+    Returns:
+        (nodes, edges) where nodes is a sorted list of active state indices
+        and edges is a list of (u, v, w) tuples that survived thresholding
+        and pruning.
+    """
+    n = adj_matrix.shape[0]
+
+    edges = []  # (u, v, w)
+    for i in range(n):
+        for j in range(n):
+            w = float(adj_matrix[i, j])
+            if w > threshold:
+                edges.append((i, j, w))
+    if self_edges is not None:
+        for i in range(n):
+            w = float(self_edges[i])
+            edges.append((i, i, w))
+
+    nodes_in_edges = {u for u, v, _ in edges} | {v for u, v, _ in edges}
+    all_nodes = set(range(n))
+    required_nodes = set(terminal_idxs) if terminal_idxs is not None else set()
+
+    if totipotent_state is not None:
+        adj = defaultdict(list)
+        for u, v, w in edges:
+            adj[u].append(v)
+        reachable = set()
+        q = deque([totipotent_state])
+        reachable.add(totipotent_state)
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if v not in reachable:
+                    reachable.add(v); q.append(v)
+        edges = [(u, v, w) for (u, v, w) in edges if u in reachable and v in reachable]
+        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
+            adj_matrix, edges, required_nodes, active_nodes=reachable
+        )
+        nodes = reachable | required_augmented_nodes
+    else:
+        seed_nodes = nodes_in_edges if nodes_in_edges else all_nodes
+        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
+            adj_matrix, edges, required_nodes, active_nodes=seed_nodes
+        )
+        nodes = seed_nodes | required_augmented_nodes
+
+    return sorted(nodes), edges
+
+
 def draw_weighted_graph(adj_matrix,
                         outfile,
                         threshold=0,
@@ -85,47 +151,11 @@ def draw_weighted_graph(adj_matrix,
         except Exception:
             return 'lightblue'
 
-    # Collect edges above threshold
-    edges = []  # (u, v, w)
-    for i in range(n):
-        for j in range(n):
-            w = float(adj_matrix[i, j])
-            if w > threshold:
-                edges.append((i, j, w))
-    if self_edges is not None:
-        for i in range(n):
-            w = float(self_edges[i])
-            # if w > threshold:
-            edges.append((i, i, w))
-
-    nodes_in_edges = {u for u, v, _ in edges} | {v for u, v, _ in edges}
-    all_nodes = set(range(n))
-    required_nodes = set(terminal_idxs) if terminal_idxs is not None else set()
-
-    # Optional pruning from starting state
-    if totipotent_state is not None:
-        adj = defaultdict(list)
-        for u, v, w in edges:
-            adj[u].append(v)
-        reachable = set()
-        q = deque([totipotent_state])
-        reachable.add(totipotent_state)
-        while q:
-            u = q.popleft()
-            for v in adj[u]:
-                if v not in reachable:
-                    reachable.add(v); q.append(v)
-        edges = [(u, v, w) for (u, v, w) in edges if u in reachable and v in reachable]
-        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
-            adj_matrix, edges, required_nodes, active_nodes=reachable
-        )
-        nodes = reachable | required_augmented_nodes
-    else:
-        seed_nodes = nodes_in_edges if nodes_in_edges else all_nodes
-        edges, required_augmented_nodes = _augment_edges_for_required_nodes(
-            adj_matrix, edges, required_nodes, active_nodes=seed_nodes
-        )
-        nodes = seed_nodes | required_augmented_nodes
+    # Collect edges above threshold and prune to the active node set
+    nodes_list, edges = compute_active_graph(
+        adj_matrix, threshold, totipotent_state, terminal_idxs, self_edges
+    )
+    nodes = set(nodes_list)
 
     # Degrees (ignoring self-loops for terminal detection)
     outdeg = defaultdict(int)
@@ -323,3 +353,112 @@ def _dag_levels(nodes, edges):
     for u in nodes:
         level.setdefault(u, 0)
     return level
+
+
+def plot_growth_rate_bar_chart(growth_rates,
+                                outfile,
+                                nodes,
+                                node_labels=None,
+                                node_colors=None,
+                                state2potency=None,
+                                bar_color='#4c72b0',
+                                label_states=False):
+    """Bar plot of per-state growth rates, x-axis annotated with potency pies.
+
+    Each bar's height is the inferred growth rate for that state. Below each
+    bar, a small pie chart is drawn whose wedges indicate the state's
+    potency (terminal fates it can differentiate into), colored the same way
+    as the corresponding nodes in ``draw_weighted_graph``. Each pie is drawn
+    as its own tiny vector Axes (not a rasterized image), so it stays crisp
+    at any zoom level or output resolution.
+
+    Inputs
+        growth_rates:  Array-like of growth rates, indexed by state idx.
+        outfile:       Path to save the plot to.
+        nodes:         Iterable of state idxs to include (left to right).
+        node_labels:   idx -> str, used to look up colors/labels.
+        node_colors:   label -> hex color dict (terminal-state colors).
+        state2potency: idx -> tuple of terminal idxs, used to build pie wedges.
+                       States absent from this mapping (or with no filtered
+                       potency) are drawn as solid circles using their own color.
+        bar_color:     Fill color for the bars.
+        label_states:  If True, also print the state label under each pie.
+    """
+    nodes = list(nodes)
+    if not nodes:
+        return
+    if node_labels is None:
+        node_labels = {i: str(i) for i in nodes}
+
+    def color_for(i):
+        if node_colors is None:
+            return 'lightblue'
+        lab = node_labels.get(i, str(i))
+        if isinstance(node_colors, dict):
+            return node_colors.get(lab, 'lightblue')
+        try:
+            return node_colors[i]
+        except Exception:
+            return 'lightblue'
+
+    heights = [float(growth_rates[i]) for i in nodes]
+
+    fig_width = max(4.0, 1.0 * len(nodes))
+    fig_height = 4.5
+    figsize = (fig_width, fig_height)
+    left_margin, right_margin = 0.15, 0.97
+    top_margin = 0.95
+    bottom_margin = 0.34 if label_states else 0.26
+    fig, ax = plt.subplots(figsize=figsize)
+    # Some callers (e.g. evaluate_results.py) set rcParams['figure.autolayout']
+    # globally, which would silently re-run tight_layout at save time and
+    # shift the manually-positioned pie axes below out from under their bars.
+    fig.set_layout_engine('none')
+    fig.subplots_adjust(left=left_margin, right=right_margin,
+                         top=top_margin, bottom=bottom_margin)
+    x = np.arange(len(nodes))
+    bars = ax.bar(x, heights, color=bar_color, width=0.6, zorder=3,
+                   edgecolor='black', linewidth=0.5)
+    ax.set_ylabel('Growth rate')
+    xlim = (-0.6, len(nodes) - 0.4)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(0, max(heights) * 1.12 if max(heights) > 0 else 1.0)
+    ax.set_xticks([])
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.bar_label(bars, fmt='%.1f', padding=3, fontsize=8)
+
+    # Each pie is its own small vector Axes, positioned in figure-fraction
+    # coordinates directly beneath its bar. This (rather than rasterizing an
+    # icon image) keeps the wedges crisp at any zoom or output resolution.
+    ax_pos = ax.get_position()
+    inches_per_unit = ax_pos.width * fig_width / (xlim[1] - xlim[0])
+    diameter_in = 0.65 * inches_per_unit
+    w_frac = diameter_in / fig_width
+    h_frac = diameter_in / fig_height
+    gap_frac = 0.05 / fig_height  # small gap between axes bottom and pie top
+
+    for xi, i in zip(x, nodes):
+        pot = state2potency.get(i) if state2potency else None
+        wedge_colors = [color_for(t) for t in pot] if pot else [color_for(i)]
+
+        axes_frac_x = (xi - xlim[0]) / (xlim[1] - xlim[0])
+        fig_x = ax_pos.x0 + axes_frac_x * ax_pos.width
+        pie_y0 = ax_pos.y0 - gap_frac - h_frac
+        pie_ax = fig.add_axes([fig_x - w_frac / 2, pie_y0, w_frac, h_frac])
+        pie_ax.set_xticks([])
+        pie_ax.set_yticks([])
+        for spine in pie_ax.spines.values():
+            spine.set_visible(False)
+        pie_ax.patch.set_alpha(0.0)
+        sizes = [1.0 / len(wedge_colors)] * len(wedge_colors)
+        pie_ax.pie(sizes, colors=wedge_colors,
+                    wedgeprops=dict(edgecolor='black', linewidth=0.6))
+        pie_ax.set_aspect('equal')
+
+        if label_states:
+            pie_ax.text(0.5, -0.18, node_labels.get(i, str(i)),
+                        transform=pie_ax.transAxes, ha='center', va='top',
+                        fontsize=7)
+
+    fig.savefig(outfile)
+    plt.close(fig)

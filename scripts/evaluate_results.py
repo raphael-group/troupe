@@ -16,7 +16,7 @@ from itertools import combinations, permutations
 from likelihood import log_vec_likelihood, _prep_log_tree
 from optimizer import sparse_regularization
 from utils import get_terminal_labels, get_observed_potencies, get_idx2potency, get_reachable_idxs
-from eval_utils import draw_weighted_graph
+from eval_utils import draw_weighted_graph, compute_active_graph, plot_growth_rate_bar_chart
 
 from kneed import KneeLocator
 import math
@@ -1754,11 +1754,15 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
     """Plot differentiation maps for all reg=X results in a directory.
 
     Treats each inferred Q matrix as a weighted directed graph with
-    self-edge weights equal to the inferred growth rates.
+    self-edge weights equal to the inferred self-renewal probability (the
+    diagonal of the daughter kernel, i.e. the probability that a division
+    produces two daughters of the same type as the parent). Growth rates are
+    plotted separately as a bar chart, with each bar's x-position annotated
+    by a pie chart showing that state's potency.
 
     Usage example:
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i $PWD/tmp/c_elegans_subsample_ABa
+            -i /Users/william_hs/Desktop/Projects/troupe/results/TLSC_new/sample_0.05
 
         python scripts/evaluate_results.py plot-differentiation-maps \
             -i $PWD/results/cardiac/sample_0.5
@@ -1770,7 +1774,10 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
     )
     if not reg_dirs:
         click.echo(f"No reg=X directories found in {results_dir}")
-        return
+        if os.path.isfile(os.path.join(results_dir, "best_model_dict.pkl")):
+            reg_dirs = [results_dir]
+        else:
+            return
 
     for reg_dir_name in reg_dirs:
         reg_path = os.path.join(results_dir, reg_dir_name)
@@ -1794,8 +1801,12 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
 
         if "daughter_kernel" in model_dict:
             rate_matrix = model_dict['daughter_kernel'].detach().numpy()
+            # Diagonal of the (row-stochastic) daughter kernel is the
+            # self-renewal probability: P(both daughters are the parent's type).
+            self_renewal_prob = np.diag(rate_matrix).copy()
         else:
             rate_matrix = model_dict['rate_matrix'].detach().numpy()
+            self_renewal_prob = None
         root_distribution = model_dict['root_distribution']
         growth_rates = model_dict['growth_rates'].detach().numpy()
         idx2state = model_dict['idx2state']
@@ -1852,6 +1863,11 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
         os.makedirs(figure_dir, exist_ok=True)
         outfile = os.path.join(figure_dir, 'differentiation_map.pdf')
 
+        # Self-edges show self-renewal probability where available (ClaSSE
+        # daughter-kernel models); fall back to growth rate for legacy
+        # rate-matrix models that have no notion of a division probability.
+        self_edge_weights = self_renewal_prob if self_renewal_prob is not None else growth_rates
+
         if "daughter_kernel" in model_dict:
             mask = np.eye(len(rate_matrix), dtype=bool)
             rate_matrix[mask] = 0
@@ -1863,12 +1879,31 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
             node_labels,
             node_colors,
             totipotent_state=starting_idx,
-            self_edges=growth_rates,
+            self_edges=self_edge_weights,
             state2potency=state2potency_filtered,
             terminal_idxs=terminal_idxs if terminal_idxs else None,
             scale_by_transitions="daughter_kernel" in model_dict
         )
         click.echo(f"  {reg_dir_name}/{suffix} -> {outfile}")
+
+        # Separate bar plot of growth rates, restricted to the same active
+        # states shown in the differentiation map, x-axis annotated with
+        # potency pie charts.
+        active_nodes, _ = compute_active_graph(
+            rate_matrix, thresh, totipotent_state=starting_idx,
+            terminal_idxs=terminal_idxs if terminal_idxs else None,
+            self_edges=self_edge_weights
+        )
+        bar_outfile = os.path.join(figure_dir, 'growth_rate_bars.pdf')
+        plot_growth_rate_bar_chart(
+            growth_rates,
+            bar_outfile,
+            nodes=active_nodes,
+            node_labels=node_labels,
+            node_colors=node_colors,
+            state2potency=state2potency_filtered,
+        )
+        click.echo(f"  {reg_dir_name}/{suffix} -> {bar_outfile}")
 
     click.echo("Done.")
 
