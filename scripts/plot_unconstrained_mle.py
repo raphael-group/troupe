@@ -11,14 +11,16 @@ birth to a daughter of type j.  This script:
      build_diff_map.py).  The DAG is used only for node positioning, forcing
      a clean hierarchical 'dot' layout.
   4. Draws the full significant graph: DAG edges as solid arrows, removed
-     back-edges as dashed arrows in grey.  Growth rates are shown as
+     back-edges as dashed arrows in grey.  Self-renewal probability (the
+     diagonal of the birth kernel B, i.e. the probability that a division
+     produces two daughters of the parent's own type) is shown as
      self-loops.
 
 Usage:
     python scripts/plot_unconstrained_mle.py \
-        -i tmp/unconstrained/model_dict.pkl \
-        -o tmp/unconstrained/figures/birth_kernel.pdf \
-        --threshold 0.02
+        -i /Users/william_hs/Desktop/Projects/troupe/results/TLS_no_endothelial_new_classe/sample_0.05/model_dict.pkl
+        -o /Users/william_hs/Desktop/Projects/troupe/results/TLS_no_endothelial_new_classe/sample_0.05/figures/birth_kernel.pdf \
+        --threshold 0.01
 """
 
 import argparse
@@ -34,16 +36,17 @@ from graphviz import Digraph
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-TERMINAL_COLORS = [
-    '#1b9e77',
-    '#d95f02',
-    '#7570b3',
-    '#e7298a',
-    '#66a61e',
-    '#e6ab02',
-    '#a6761d',
-    '#f781bf',
-    '#999999'
+TLS_COLORS = {
+    'NeuralTube':  '#1b9e77',
+    'Somite':      '#d95f02',
+    'Endoderm':    '#7570b3',
+    'PCGLC':       '#e7298a',
+    'Endothelial': '#66a61e',
+    'NMP':         '#ff7f00',
+}
+FALLBACK_COLORS = [
+    '#1b9e77', '#d95f02', '#7570b3', '#e7298a',
+    '#66a61e', '#e6ab02', '#a6761d', '#f781bf', '#999999',
 ]
 HIDDEN_COLOR = "#DDDDDD"
 ROOT_COLOR   = "#888888"
@@ -141,9 +144,25 @@ def _dag_levels(nodes, dag_adj):
 # Drawing
 # ---------------------------------------------------------------------------
 
+def _reachable_terminals(start, B_off, terminal_set, nodes):
+    """BFS over the thresholded birth-kernel graph; return sorted reachable terminal idxs."""
+    adj = {i: [j for j in nodes if B_off[i, j] > 0] for i in nodes}
+    visited = set()
+    queue = deque([start])
+    while queue:
+        u = queue.popleft()
+        if u in visited:
+            continue
+        visited.add(u)
+        for v in adj[u]:
+            if v not in visited:
+                queue.append(v)
+    return sorted(t for t in terminal_set if t in visited)
+
+
 def draw_birth_kernel(
     B_off,
-    growth_rates,
+    self_renewal_prob,
     dag_adj,
     back_edges,
     idx2state,
@@ -151,15 +170,17 @@ def draw_birth_kernel(
     terminal_idxs,
     outfile,
     state_text=None,
+    forced_levels=None,
 ):
     n = B_off.shape[0]
     nodes = list(range(n))
     terminal_set = set(terminal_idxs)
 
-    # Node colors
+    # Node colors: use TLS palette by name, fall back to generic list by rank.
     term_colors = {}
     for k, idx in enumerate(sorted(terminal_set)):
-        term_colors[idx] = TERMINAL_COLORS[k % len(TERMINAL_COLORS)]
+        name = str(idx2state[idx])
+        term_colors[idx] = TLS_COLORS.get(name, FALLBACK_COLORS[k % len(FALLBACK_COLORS)])
 
     def node_color(i):
         if i in terminal_set:
@@ -177,27 +198,37 @@ def draw_birth_kernel(
     all_weights = [w for _, _, w in dag_edges] + [w for _, _, w in back_edges]
     max_w = max(all_weights, default=1.0)
 
-    def edge_attrs(w, dashed=False):
+    def edge_attrs(w):
         pen = max(7.0 * (w / max_w), 0.8)
         arr = max(0.3, 0.1 * pen)
-        attrs = {
-            "penwidth":    f"{pen:.3g}",
-            "arrowsize":   f"{arr:.3g}",
-            "xlabel":      _html_pill(f"{w:.2g}"),
+        return {
+            "penwidth":      f"{pen:.3g}",
+            "arrowsize":     f"{arr:.3g}",
+            "xlabel":        _html_pill(f"{w:.2g}"),
             "labelfontsize": "8",
         }
-        if dashed:
-            attrs["style"] = "dashed"
-            attrs["color"] = "#999999"
-        return attrs
 
-    # DAG-based levels for rank= subgraphs
-    levels = _dag_levels(nodes, dag_adj)
-    if terminal_idxs:
-        max_level = max(levels.values())
-        max_level = max(max_level, max(levels.get(t, 0) for t in terminal_idxs))
-        for t in terminal_idxs:
-            levels[t] = max_level
+    # Level assignment: forced_levels (name→level dict) overrides DAG computation.
+    if forced_levels is not None:
+        name2idx = {str(idx2state[i]): i for i in nodes}
+        levels = {}
+        max_forced = max(forced_levels.values(), default=0)
+        for name, lvl in forced_levels.items():
+            if name in name2idx:
+                levels[name2idx[name]] = lvl
+        bottom = max_forced + 1
+        for i in nodes:
+            if i not in levels:
+                # Terminals always at the bottom row; unassigned non-terminals
+                # stay above it at the last explicitly forced level.
+                levels[i] = bottom if i in terminal_set else max_forced
+    else:
+        levels = _dag_levels(nodes, dag_adj)
+        if terminal_idxs:
+            max_level = max(levels.values())
+            max_level = max(max_level, max(levels.get(t, 0) for t in terminal_idxs))
+            for t in terminal_idxs:
+                levels[t] = max_level
 
     fmt = _infer_fmt(outfile)
     g = Digraph("G", format=fmt, engine="dot")
@@ -210,42 +241,45 @@ def draw_birth_kernel(
            fontsize="10", penwidth="1", width="0.85", height="0.85", fixedsize="true")
     g.attr("edge", fontname="Helvetica", fontsize="8", arrowhead="normal")
 
-    # Nodes
+    # All nodes get a potency pie: wedge colors for each terminal reachable from
+    # that state in the thresholded birth-kernel graph.  A terminal state always
+    # includes itself; if it reaches other terminals those appear too.
     for i in sorted(nodes):
-        g.node(str(i), label=str(idx2state[i]), fillcolor=node_color(i))
+        label = str(idx2state[i])
+        pot = _reachable_terminals(i, B_off, terminal_set, nodes)
+        if pot:
+            wedge_colors = [term_colors[t] for t in pot]
+            g.node(str(i), label=label, style="wedged,filled",
+                   fillcolor=":".join(wedge_colors))
+        else:
+            g.node(str(i), label=label, fillcolor=node_color(i))
 
-    # DAG edges (solid)
-    for u, v, w in dag_edges:
-        g.edge(str(u), str(v), **edge_attrs(w, dashed=False))
+    # All edges drawn solid with uniform styling (DAG edges + back-edges alike)
+    for u, v, w in dag_edges + list(back_edges):
+        g.edge(str(u), str(v), **edge_attrs(w))
 
-    # Back-edges (dashed grey) — shown but don't influence layout
-    for u, v, w in back_edges:
-        g.edge(str(u), str(v), **edge_attrs(w, dashed=True))
-
-    # Self-loops for growth rates
-    max_lam = max(float(growth_rates[i]) for i in nodes)
+    # Self-loops for self-renewal probability (same styling as other edges)
+    max_srp = max(float(self_renewal_prob[i]) for i in nodes)
     for i in nodes:
-        lam = float(growth_rates[i])
-        pen = max(7.0 * (lam / max_lam), 0.8)
+        srp = float(self_renewal_prob[i])
+        pen = max(7.0 * (srp / max_srp), 0.8)
         arr = max(0.3, 0.1 * pen)
         g.edge(str(i), str(i),
                penwidth=f"{pen:.3g}", arrowsize=f"{arr:.3g}",
-               xlabel=_html_pill(f"λ={lam:.2g}"), labelfontsize="8")
+               xlabel=_html_pill(f"{srp:.2g}"),
+               labelfontsize="8")
 
-    # Rank subgraphs: root pinned to top, terminals pinned to bottom,
-    # intermediate levels get rank='same' for horizontal alignment.
+    # Rank subgraphs: min level pinned to top, max level pinned to bottom.
     level2nodes = defaultdict(list)
     for u in nodes:
         level2nodes[levels[u]].append(u)
 
-    for lvl in sorted(level2nodes):
-        lvl_nodes = sorted(level2nodes[lvl])
-        is_top    = start_state is not None and all(u == start_state for u in lvl_nodes)
-        is_bottom = terminal_idxs and all(u in terminal_set for u in lvl_nodes)
-
+    all_levels = sorted(level2nodes)
+    min_lvl, max_lvl = all_levels[0], all_levels[-1]
+    for lvl in all_levels:
         with g.subgraph() as s:
-            s.attr(rank="min" if is_top else ("max" if is_bottom else "same"))
-            for u in lvl_nodes:
+            s.attr(rank="min" if lvl == min_lvl else ("max" if lvl == max_lvl else "same"))
+            for u in sorted(level2nodes[lvl]):
                 s.node(str(u))
 
     base = os.path.splitext(outfile)[0]
@@ -269,6 +303,10 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.02,
                         help="Minimum birth-kernel probability to show an edge. "
                              "Default: 0.02.")
+    parser.add_argument("--state_levels", nargs="*", default=None, metavar="NAME=LEVEL",
+                        help="Pin states to explicit rank levels (0 = top). "
+                             "States not listed default to the bottom level. "
+                             "Example: --state_levels U5=0 U6=1 NMP=2")
     args = parser.parse_args()
 
     # Resolve input path
@@ -293,7 +331,9 @@ def main():
 
     # Extract model components
     B = model_dict["daughter_kernel"].detach().numpy()
-    growth_rates = model_dict["growth_rates"].detach().numpy()
+    # Diagonal of the (row-stochastic) birth kernel is the self-renewal
+    # probability: P(both daughters are the parent's own type).
+    self_renewal_prob = np.diag(B).copy()
     idx2state  = model_dict["idx2state"]
     start_state = model_dict.get("start_state")
     neg_llh = float(model_dict.get("neg_llh", float("nan")))
@@ -305,17 +345,21 @@ def main():
 
     n = B.shape[0]
 
-    # Identify terminal (observed) states.
-    # Convention: start_state == n_obs; observed indices are 0 … start_state-1.
-    # Fall back to checking for hidden-state naming pattern "U<int>".
-    if start_state is not None:
+    # Identify true terminal states from idx2potency (the potency tuple lists
+    # exactly the terminal names specified via --terminal_states).  Fall back to
+    # all observed states (range(start_state)) if idx2potency is absent.
+    idx2potency = model_dict.get("idx2potency")
+    if idx2potency:
+        potency_names = set(next(iter(idx2potency.values())))
+        terminal_idxs = sorted(i for i, s in idx2state.items()
+                               if str(s) in potency_names)
+    elif start_state is not None:
         terminal_idxs = list(range(start_state))
     else:
-        terminal_idxs = [
+        terminal_idxs = sorted(
             i for i, s in idx2state.items()
             if not (isinstance(s, str) and s.startswith("U") and s[1:].isdigit())
-        ]
-    terminal_idxs.sort()
+        )
 
     print(f"States ({n} total): {idx2state}")
     print(f"Terminal idxs: {terminal_idxs}")
@@ -326,6 +370,18 @@ def main():
     B_off = B.copy()
     np.fill_diagonal(B_off, 0.0)
     B_thresh = np.where(B_off >= args.threshold, B_off, 0.0)
+
+    # Prevent disconnected nodes: for any non-root node with no incoming edges
+    # after thresholding, restore its strongest incoming edge.
+    for j in range(n):
+        if j == start_state:
+            continue
+        if B_thresh[:, j].sum() == 0:
+            i_best = int(np.argmax(B_off[:, j]))
+            if B_off[i_best, j] > 0:
+                B_thresh[i_best, j] = B_off[i_best, j]
+                print(f"Restored weakest-incoming edge {idx2state[i_best]} -> "
+                      f"{idx2state[j]} (w={B_off[i_best, j]:.4f}) to prevent disconnection")
 
     n_sig = int((B_thresh > 0).sum())
     print(f"Significant edges (>= {args.threshold}): {n_sig}")
@@ -340,11 +396,19 @@ def main():
     else:
         print("Graph is already a DAG — no edges removed.")
 
+    forced_levels = None
+    if args.state_levels:
+        forced_levels = {}
+        for item in args.state_levels:
+            name, lvl = item.split("=", 1)
+            forced_levels[name.strip()] = int(lvl.strip())
+        print(f"Forced levels: {forced_levels}")
+
     state_text = f"neg-llh={neg_llh:.2f}  threshold={args.threshold}"
 
     draw_birth_kernel(
         B_off=B_thresh,
-        growth_rates=growth_rates,
+        self_renewal_prob=self_renewal_prob,
         dag_adj=dag_adj,
         back_edges=back_edges,
         idx2state=idx2state,
@@ -352,6 +416,7 @@ def main():
         terminal_idxs=terminal_idxs,
         outfile=outfile,
         state_text=state_text,
+        forced_levels=forced_levels,
     )
 
 
