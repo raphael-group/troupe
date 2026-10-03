@@ -7,9 +7,10 @@ This is the baseline against which TROUPE's potency constraints are evaluated.
 
 The state space consists of the observed terminal types found in the data plus
 an optional number of hidden (unobserved) states specified by --num_hidden.
-A single MLE optimization is run (no regularization sweep, no Phase 1/2 split).
+A single MLE optimization is run (no regularization sweep).
 
-NOTE: This assumes that all observed states are terminal states.
+NOTE: This assumes that all observed states are terminal states (this is
+relevant for encoding potencies).
 
 Usage:
     python scripts/run_classe_unconstrained.py \
@@ -151,14 +152,20 @@ def detect_labels(trees):
     return sorted(states)
 
 
-def build_model_info(terminal_labels, num_hidden: int, backend: str):
+def build_model_info(terminal_labels, num_hidden: int, backend: str,
+                     potency_terminal_labels=None):
     """Build state-space description for the unconstrained model.
 
     Observed terminal states are indexed 0 ... n_obs-1; hidden states follow.
-    All states are assigned potency = full set of terminal labels so that
-    downstream utilities reading idx2potency are not confused.  The
-    DaughterKernelBuilder receives idx2potency=None (mask = all ones,
-    unconstrained), which is equivalent.
+    All states are assigned potency = full set of terminal labels (or the
+    optional potency_terminal_labels subset) so that downstream utilities
+    reading idx2potency are not confused.  The DaughterKernelBuilder receives
+    idx2potency=None (mask = all ones, unconstrained), which is equivalent.
+
+    Args:
+        potency_terminal_labels: Optional subset of terminal_labels to use as
+            the potency set for all states.  If None, all terminal_labels are
+            used (original behaviour).
     """
     n_obs = len(terminal_labels)
     n_states = n_obs + num_hidden
@@ -170,7 +177,8 @@ def build_model_info(terminal_labels, num_hidden: int, backend: str):
         idx2state[idx] = f"U{idx}"
         state2idx[f"U{idx}"] = idx
 
-    full_potency = tuple(sorted(terminal_labels))
+    potency_set = potency_terminal_labels if potency_terminal_labels is not None else terminal_labels
+    full_potency = tuple(sorted(potency_set))
     idx2potency = {i: full_potency for i in range(n_states)}
 
     # Root is the first hidden state when hidden states exist so that the model
@@ -479,6 +487,14 @@ def main():
         "--seed", type=int, default=0,
         help="Master random seed for restart initialisations. Default: 0.",
     )
+    parser.add_argument(
+        "--terminal_states", nargs="+", default=None,
+        help="Optional subset of observed states to treat as terminal states for "
+             "potency bookkeeping.  Every state is assigned full potency over this "
+             "subset (no constraints applied).  Must be a subset of the observed "
+             "labels found in the data.  If omitted, all observed labels are used "
+             "(original behaviour).",
+    )
     args = parser.parse_args()
 
     if not (0 < args.sampling_probability <= 1.0):
@@ -490,18 +506,30 @@ def main():
     trees = load_trees(args.input, newick_format=args.newick_format)
     logger.info("Loaded %d trees", len(trees))
     
-    # NOTE: All observed labels are treated as terminals
-    terminal_labels = detect_labels(trees)
-    n_obs    = len(terminal_labels)
+    observed_labels = detect_labels(trees)
+    n_obs    = len(observed_labels)
     n_states = n_obs + args.num_hidden
-    logger.info("Terminal labels (%d): %s", n_obs, terminal_labels)
+    logger.info("Observed labels (%d): %s", n_obs, observed_labels)
     logger.info(
         "State space: %d total (%d observed + %d hidden)",
         n_states, n_obs, args.num_hidden,
     )
 
+    potency_terminal_labels = None
+    if args.terminal_states is not None:
+        observed_set = set(observed_labels)
+        requested = set(args.terminal_states)
+        if not requested.issubset(observed_set):
+            unknown = requested - observed_set
+            parser.error(
+                f"--terminal_states contains labels not found in the data: {sorted(unknown)}"
+            )
+        potency_terminal_labels = sorted(requested)
+        logger.info("Potency terminal labels (%d): %s", len(potency_terminal_labels), potency_terminal_labels)
+
     model_info, state2idx = build_model_info(
-        terminal_labels, args.num_hidden, args.backend
+        observed_labels, args.num_hidden, args.backend,
+        potency_terminal_labels=potency_terminal_labels,
     )
     logger.info("idx2state:   %s", model_info["idx2state"])
     logger.info("start_state: %s", model_info["start_state"])

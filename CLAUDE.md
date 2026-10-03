@@ -35,10 +35,13 @@ All tests must be self-contained — no pickled files or hardcoded paths. Use `s
 
 ```bash
 # Unified pipeline (preferred — handles both phases + model selection)
-python scripts/run_troupe.py \
-    -i example/data/trees.pkl \
-    -o example/results \
-    --regularizations 0.001 0.003 0.01 0.03 0.1 0.3 1 3 10
+python scripts/run_classe_troupe.py \
+  -i example/data/trees.pkl \
+  -o example/results \
+  --regularizations 0.1 0.3 1 3 10 30 100 \
+  --sampling_probability 0.1 \
+  --phase1_penalty column_group_lasso \
+  --phase2_penalty l1
 
 # Legacy multi-script pipeline (see troupe_inference_example.sh)
 # Note: working_dir in troupe_inference_example.sh must be updated to your local path
@@ -55,7 +58,7 @@ TROUPE infers cell differentiation dynamics from lineage trees by fitting a Cont
 2. **Phase 2** — Potency extraction from Phase 1 model → reduced state space → debiased re-fit with warm-start initialization.
 3. **Model selection** — Knee detection on neg-log-likelihood vs. number of reachable states (via `kneed.KneeLocator`).
 
-The unified pipeline is in `scripts/run_troupe.py`. The legacy pipeline uses individual scripts (`scripts/save_potency_sets.py`, `scripts/infer_model.py`, etc.).
+The unified pipeline is in `scripts/run_classe_troupe.py`. The legacy pipeline uses individual scripts (`scripts/save_potency_sets.py`, `scripts/infer_model.py`, etc.).
 
 ### Source Modules (`src/`)
 
@@ -77,6 +80,6 @@ The unified pipeline is in `scripts/run_troupe.py`. The legacy pipeline uses ind
 
 - **Trees**: ete3 `TreeNode` objects. Leaves must have a `.state` attribute (integer index). Trees must be binary (use `binarize_tree`) and ultrametric with a unifurcating root (added automatically if missing).
 - **Potency sets**: A dict `idx2potency` mapping each state index to a tuple of terminal state indices the state can eventually differentiate into. Observed (terminal) states map to `(self,)`. Hidden states map to multi-element tuples.
-- **Saved models**: `model_dict.pkl` contains `rate_matrix`, `root_distribution`, `growth_rates`, `idx2state`, `idx2potency`.
+- **Saved models**: `model_dict.pkl` contains `daughter_kernel`, `root_distribution`, `growth_rates`, `idx2state`, `idx2potency`.
 - **Float64**: All tensors use `torch.float64`. Set globally via `torch.set_default_dtype(torch.float64)`.
 - **Numerical stability**: `EPS = 1e-30` used as log-space zero; softplus with `threshold=10` for parameter transformations.

@@ -325,6 +325,37 @@ def _collect_phase2_kept_states(
     return kept_old_idxs, dropped_old_idxs, old_idx2potency, mandatory_old_idxs
 
 
+def _make_phase2_bk_params_init(idx2potency, n_states, device, rng, noise_scale=1.0):
+    """Birth-kernel logits for Phase 2 restarts: uniform over allowed columns + Gaussian noise.
+
+    For each row i, allowed daughter columns are those j where potency(j) ⊆ potency(i).
+    All allowed entries are initialised to N(0, noise_scale²); forbidden entries stay at
+    −1e30 so they are excluded from the softmax. Starting from uniform (mean 0 logits)
+    means every allowed transition is a priori equally likely, and the noise breaks
+    symmetry between restarts without biasing toward any particular subset.
+
+    Args:
+        idx2potency:  Dict mapping state index → potency tuple.
+        n_states:     Total number of Phase 2 states.
+        device:       Torch device.
+        rng:          numpy.random.Generator (must not be None).
+        noise_scale:  Std-dev of the Gaussian logit perturbation. Default: 1.0.
+
+    Returns:
+        (n_states, n_states) tensor of logits (forbidden entries = −1e30).
+    """
+    bk = torch.full((n_states, n_states), -1e30, device=device, dtype=dtype)
+    for i in range(n_states):
+        potency_i = set(idx2potency[i])
+        allowed = [j for j in range(n_states) if set(idx2potency[j]).issubset(potency_i)]
+        if not allowed:
+            allowed = [i]
+        noise = rng.normal(0.0, noise_scale, size=len(allowed))
+        for j, n in zip(allowed, noise):
+            bk[i, j] = float(n)
+    return bk
+
+
 def _compute_classe_mle(
     trees_labeled,
     n_states,
@@ -337,6 +368,7 @@ def _compute_classe_mle(
     do_logging=True,
     num_iter=100,
     log_iter=1,
+    max_hidden_growth_rate=50.0,
 ):
     """Fit a ClaSSELikelihoodModel via LBFGS and save results.
 
@@ -404,6 +436,13 @@ def _compute_classe_mle(
     )
 
     tree_idxs = list(range(len(trees_labeled)))
+
+    terminal_idxs = set(model_info.get("terminal_states", []))
+    hidden_idxs = [i for i in range(n_states) if i not in terminal_idxs]
+    max_hidden_growth_param = _safe_softplus_inverse(
+        torch.tensor(max_hidden_growth_rate, dtype=dtype)
+    ).item() if hidden_idxs and max_hidden_growth_rate is not None else None
+
     changeable_params = [p for p in llh.parameters(recurse=True) if p.requires_grad]
     optimizer = optim.LBFGS(
         changeable_params,
@@ -431,6 +470,11 @@ def _compute_classe_mle(
 
     def closure():
         optimizer.zero_grad()
+        if max_hidden_growth_param is not None:
+            with torch.no_grad():
+                llh.growth_params[hidden_idxs] = llh.growth_params[hidden_idxs].clamp(
+                    max=max_hidden_growth_param
+                )
         llh.precompute_ode()
         objective = _loss()
         if not torch.isfinite(objective):
@@ -812,9 +856,144 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
 # 7. Phase 2: Potency extraction + debiased ClaSSE MLE
 # ---------------------------------------------------------------------------
 
+def _run_phase2_preset(phase1_dir, trees, terminal_labels, observed_potencies,
+                       is_int_state, sampling_prob, debiasing_l1, device, backend,
+                       phase2_penalty="l1", num_restarts=1, seed=0,
+                       preset_potencies=None):
+    """Phase 2 with a user-supplied potency structure (no Phase 1 needed).
+
+    Builds the reduced state space directly from `preset_potencies` and
+    initializes with the same defaults as Phase 1: uniform birth kernel
+    over potency-allowed columns and constant-rate growth rates estimated
+    from the trees.
+    """
+    try:
+        terminal_set = set(terminal_labels)
+
+        # Terminal singletons first, then non-singleton preset entries.
+        # Observed intermediates: leaf-labeled states with non-singleton potency
+        # in the preset (e.g. NMPs → (NeuralTube, Somite)).  These must NOT get
+        # a singleton state — they map directly to their bipotent/multipotent state.
+        obs_for_mapping = {
+            state: potency
+            for state, potency in preset_potencies.items()
+            if state in terminal_set and len(potency) > 1
+        }
+        obs_intermediate_names = set(obs_for_mapping)
+
+        # Terminal singletons first, skipping observed intermediates.
+        ordered_potencies = [
+            (state,) for state in terminal_labels
+            if state not in obs_intermediate_names
+        ]
+        # Then all non-singleton preset entries (including bipotent intermediates).
+        for _, potency in sorted(preset_potencies.items(), key=lambda kv: (len(kv[1]), kv[1])):
+            if potency not in ordered_potencies:
+                ordered_potencies.append(potency)
+
+        idx2potency, newidx2state, state2newidx = _build_phase2_label_maps(
+            ordered_potencies, terminal_labels, obs_for_mapping
+        )
+        n_states_new = len(idx2potency)
+
+        # Starting state: the most multipotent state in the preset.
+        initial_idx = max(idx2potency, key=lambda i: (len(idx2potency[i]), idx2potency[i]))
+
+        logger.info("Phase 2 (preset): %d states, start_state=%d (%s)",
+                    n_states_new, initial_idx, newidx2state.get(initial_idx))
+        logger.info("idx2state:   %s", newidx2state)
+        logger.info("idx2potency: %s", idx2potency)
+
+        # No explicit B_params_init / growth_params_init → _compute_classe_mle
+        # uses the standard defaults (uniform B, constant-rate MLE).
+        phase2_model_info = {
+            "start_state": initial_idx,
+            "idx2state": newidx2state,
+            "idx2potency": idx2potency,
+            "terminal_states": [state2newidx[s] for s in terminal_labels if s in state2newidx],
+            "optimize_growth": True,
+            "backend": backend,
+        }
+
+        trees_copy = copy.deepcopy(trees)
+        for tree in trees_copy:
+            for leaf in tree.get_leaves():
+                if leaf.state not in state2newidx:
+                    raise RuntimeError(
+                        f"Observed leaf state {leaf.state!r} is absent from the preset Phase 2 state space."
+                    )
+                leaf.state = state2newidx[leaf.state]
+
+        output_dir = f"{phase1_dir}/select_potencies"
+        os.makedirs(output_dir, exist_ok=True)
+
+        rng_master = np.random.default_rng(seed)
+        best_neg_llh = float("inf")
+        best_restart_dir = None
+
+        for r in range(num_restarts):
+            restart_dir = (
+                os.path.join(output_dir, f"restart_{r}") if num_restarts > 1
+                else output_dir
+            )
+
+            if r == 0:
+                model_info_r = phase2_model_info
+            else:
+                rng = np.random.default_rng(rng_master.integers(2**31))
+                bk_rand = _make_phase2_bk_params_init(idx2potency, n_states_new, device, rng)
+                potency_sizes = torch.tensor(
+                    [len(idx2potency[i]) for i in range(n_states_new)],
+                    device=device, dtype=dtype,
+                )
+                gr_noise = torch.tensor(
+                    rng.normal(0.0, 1.0, size=n_states_new), device=device, dtype=dtype
+                ) * potency_sizes
+                gr_base = _safe_softplus_inverse(
+                    torch.ones(n_states_new, device=device, dtype=dtype)
+                    * constant_rate_mle(trees_copy)
+                )
+                model_info_r = {**phase2_model_info, "B_params_init": bk_rand,
+                                "growth_params_init": gr_base + gr_noise}
+
+            try:
+                logger.info("Phase 2 (preset) restart %d / %d", r, num_restarts - 1)
+                _compute_classe_mle(
+                    trees_copy, n_states_new, device, restart_dir,
+                    model_info_r, sampling_prob, l1_reg=debiasing_l1,
+                    regularization_type=phase2_penalty,
+                )
+                loss_file = os.path.join(restart_dir, "loss.txt")
+                with open(loss_file) as fp:
+                    neg_llh = float(fp.read().strip())
+                logger.info("Phase 2 (preset) restart %d: neg-llh=%.6f", r, neg_llh)
+                if neg_llh < best_neg_llh:
+                    best_neg_llh = neg_llh
+                    best_restart_dir = restart_dir
+            except Exception as e:
+                logger.warning("Phase 2 (preset) restart %d failed: %s", r, e)
+
+        if best_restart_dir is None:
+            raise RuntimeError("All Phase 2 (preset) restarts failed.")
+
+        if num_restarts > 1 and best_restart_dir != output_dir:
+            for fname in ("state_dict.pth", "model_dict.pkl", "loss.txt"):
+                src = os.path.join(best_restart_dir, fname)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(output_dir, fname))
+            logger.info("Phase 2 (preset) best restart: %s (neg-llh=%.6f)",
+                        best_restart_dir, best_neg_llh)
+
+        return output_dir
+
+    except Exception as e:
+        logger.error("Phase 2 (preset) failed for %s: %s", phase1_dir, e, exc_info=True)
+        return None
+
+
 def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
                is_int_state, sampling_prob, debiasing_l1, threshold, device, backend,
-               phase2_penalty="l1"):
+               phase2_penalty="l1", num_restarts=1, seed=0, preset_potencies=None):
     """Extract potencies from Phase 1 model and run debiased Phase 2 ClaSSE MLE.
 
     Loads the Phase 1 model, finds reachable states from B, computes potencies
@@ -832,10 +1011,28 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         threshold: Reachability threshold for get_reachable_idxs.
         device: Torch device.
         phase2_penalty: Penalty family for Phase 2.
+        num_restarts: Number of optimization runs. Restart 0 uses the Phase 1
+            warm-start; subsequent restarts use random potency-constrained
+            initializations. The best (lowest neg-llh) result is kept.
+        seed: Master random seed for restart initializations.
+        preset_potencies: If provided, a dict mapping state names (including
+            hidden states) to potency tuples that defines the Phase 2 state
+            space directly, bypassing potency inference from Phase 1's B matrix.
+            Terminal singletons are always included. Initialization uses the
+            same defaults as Phase 1 (uniform B, constant-rate growth); no
+            Phase 1 model_dict is required.
 
     Returns:
         Phase 2 output directory on success, None on failure.
     """
+    if preset_potencies is not None:
+        return _run_phase2_preset(
+            phase1_dir, trees, terminal_labels, observed_potencies,
+            is_int_state, sampling_prob, debiasing_l1, device, backend,
+            phase2_penalty=phase2_penalty, num_restarts=num_restarts, seed=seed,
+            preset_potencies=preset_potencies,
+        )
+
     model_dict_path = f"{phase1_dir}/model_dict.pkl"
     if not os.path.isfile(model_dict_path):
         logger.error("Phase 1 model_dict not found: %s", model_dict_path)
@@ -851,6 +1048,10 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         idx2state = model_dict["idx2state"]
         starting_idx = torch.argmax(model_dict["root_distribution"]).item()
 
+        terminal_set = set(terminal_labels)
+
+        # --- Standard path: infer potency from Phase 1 B matrix ---
+
         # Find reachable states from B
         reachable_idxs = get_reachable_idxs(B_np, starting_idx, threshold=threshold)
         logger.info("Phase 2: %d reachable states from starting idx %d",
@@ -859,7 +1060,6 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         # Infer support-based observed-terminal potencies from the direct
         # daughter-kernel support graph, but never drop observed labels that
         # actually appear in the trees.
-        terminal_set = set(terminal_labels)
         idx2potency_, _support_graph, forced_support_edges = _infer_support_graph_potencies_classe(
             B_np,
             idx2state,
@@ -1007,11 +1207,60 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
         output_dir = f"{phase1_dir}/select_potencies"
         os.makedirs(output_dir, exist_ok=True)
 
-        _compute_classe_mle(
-            trees_copy, n_states_new, device, output_dir,
-            phase2_model_info, sampling_prob, l1_reg=debiasing_l1,
-            regularization_type=phase2_penalty,
-        )
+        rng_master = np.random.default_rng(seed)
+        best_neg_llh = float("inf")
+        best_restart_dir = None
+
+        for r in range(num_restarts):
+            restart_dir = (
+                os.path.join(output_dir, f"restart_{r}") if num_restarts > 1
+                else output_dir
+            )
+
+            if r == 0:
+                model_info_r = phase2_model_info
+            else:
+                rng = np.random.default_rng(rng_master.integers(2**31))
+                bk_rand = _make_phase2_bk_params_init(idx2potency, n_states_new, device, rng)
+                potency_sizes = torch.tensor(
+                    [len(idx2potency[i]) for i in range(n_states_new)],
+                    device=device, dtype=dtype,
+                )
+                gr_noise = torch.tensor(
+                    rng.normal(0.0, 1.0, size=n_states_new), device=device, dtype=dtype
+                ) * potency_sizes
+                gr_rand = phase2_model_info["growth_params_init"] + gr_noise
+                model_info_r = {**phase2_model_info, "B_params_init": bk_rand,
+                                "growth_params_init": gr_rand}
+
+            try:
+                logger.info("Phase 2 restart %d / %d", r, num_restarts - 1)
+                _compute_classe_mle(
+                    trees_copy, n_states_new, device, restart_dir,
+                    model_info_r, sampling_prob, l1_reg=debiasing_l1,
+                    regularization_type=phase2_penalty,
+                )
+                loss_file = os.path.join(restart_dir, "loss.txt")
+                with open(loss_file) as fp:
+                    neg_llh = float(fp.read().strip())
+                logger.info("Phase 2 restart %d: neg-llh=%.6f", r, neg_llh)
+                if neg_llh < best_neg_llh:
+                    best_neg_llh = neg_llh
+                    best_restart_dir = restart_dir
+            except Exception as e:
+                logger.warning("Phase 2 restart %d failed: %s", r, e)
+
+        if best_restart_dir is None:
+            raise RuntimeError("All Phase 2 restarts failed.")
+
+        if num_restarts > 1 and best_restart_dir != output_dir:
+            for fname in ("state_dict.pth", "model_dict.pkl", "loss.txt"):
+                src = os.path.join(best_restart_dir, fname)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(output_dir, fname))
+            logger.info(
+                "Phase 2 best restart: %s (neg-llh=%.6f)", best_restart_dir, best_neg_llh
+            )
 
         return output_dir
 
@@ -1204,6 +1453,17 @@ def main():
         help="Path to observed potencies file. Default: each terminal maps to (itself,)",
     )
     parser.add_argument(
+        "--preset_potencies", type=str, default=None,
+        help=(
+            "Path to a file specifying the complete Phase 2 state space, bypassing "
+            "potency inference from Phase 1. Same tab-delimited format as "
+            "--observed_potencies (state<TAB>terminal1,terminal2,...) but may also "
+            "include hidden states (names not appearing as leaf labels). Terminal "
+            "singletons are always auto-included and need not be listed. "
+            "Phase 1 warm-start is still used where potencies match."
+        ),
+    )
+    parser.add_argument(
         "--regularizations", type=float, nargs="+",
         default=[0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30],
         help="List of regularization strengths for Phase 1",
@@ -1225,6 +1485,16 @@ def main():
         "--phase2_penalty", type=str, default="l1",
         choices=["l1", "column_group_lasso"],
         help="Penalty family for Phase 2 regularization",
+    )
+    parser.add_argument(
+        "--phase2_num_restarts", type=int, default=1,
+        help="Number of Phase 2 optimization runs. Restart 0 uses the Phase 1 "
+             "warm-start; subsequent restarts use random potency-constrained "
+             "initializations. The best result (lowest neg-llh) is kept. Default: 1.",
+    )
+    parser.add_argument(
+        "--phase2_seed", type=int, default=0,
+        help="Master random seed for Phase 2 restart initializations. Default: 0.",
     )
     parser.add_argument(
         "--reachability_threshold", type=float, default=0.001,
@@ -1280,11 +1550,27 @@ def main():
         terminal_labels = detected_labels
     logger.info("Terminal labels (%d): %s", len(terminal_labels), terminal_labels)
 
+    # --- Load preset Phase 2 potency structure (optional) ---
+    preset_potencies = None
+    if args.preset_potencies:
+        preset_potencies = get_observed_potencies(args.preset_potencies, is_int_state)
+        logger.info("Preset Phase 2 potencies (%d states): %s", len(preset_potencies), preset_potencies)
+
     # --- Load or auto-generate observed potencies ---
+    terminal_set = set(terminal_labels)
     if args.observed_potencies:
         observed_potencies = get_observed_potencies(
             args.observed_potencies, is_int_state
         )
+    elif preset_potencies is not None:
+        # Use all leaf-labeled states from the preset as observed_potencies.
+        # This includes singleton terminals (needed for hidden-state counting in
+        # build_model_info) and non-singleton intermediates like NMPs.
+        observed_potencies = {
+            state: potency
+            for state, potency in preset_potencies.items()
+            if state in terminal_set
+        }
     else:
         observed_potencies = auto_observed_potencies(terminal_labels)
     logger.info("Observed potencies (%d): %s",
@@ -1312,6 +1598,42 @@ def main():
         )
         return
 
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if preset_potencies is not None:
+        # --- Preset path: single Phase 2 run, no reg sweep or model selection ---
+        logger.info("=" * 60)
+        logger.info("Phase 2 (preset potencies)")
+        logger.info("=" * 60)
+        phase2_dir = _run_phase2_preset(
+            args.output_dir, trees, terminal_labels, observed_potencies,
+            is_int_state, args.sampling_probability,
+            args.debiasing_l1, device, args.backend,
+            phase2_penalty=args.phase2_penalty,
+            num_restarts=args.phase2_num_restarts,
+            seed=args.phase2_seed,
+            preset_potencies=preset_potencies,
+        )
+        if phase2_dir is None:
+            raise RuntimeError("Phase 2 (preset) failed.")
+
+        best_src = os.path.join(phase2_dir, "model_dict.pkl")
+        best_dst = os.path.join(args.output_dir, "best_model_dict.pkl")
+        shutil.copy2(best_src, best_dst)
+        logger.info("Best model copied to %s", best_dst)
+
+        with open(os.path.join(phase2_dir, "loss.txt")) as fp:
+            neg_llh = float(fp.read().strip())
+        with open(os.path.join(args.output_dir, "classe_troupe_summary.txt"), "w") as fp:
+            fp.write(f"preset_potencies\t{args.preset_potencies}\n")
+            fp.write(f"best_model_dir\t{phase2_dir}\n")
+            fp.write(f"neg_llh\t{neg_llh}\n")
+            fp.write(f"sampling_probability\t{args.sampling_probability}\n")
+        logger.info("Done! Preset Phase 2 neg-llh=%.4f", neg_llh)
+        return
+
+    # --- Standard path: Phase 1 reg sweep + Phase 2 + model selection ---
+
     # --- Collect observed states from trees ---
     states = set()
     for tree in trees:
@@ -1337,8 +1659,6 @@ def main():
     model_info["backend"] = args.backend
 
     # --- Run inference for each regularization value ---
-    os.makedirs(args.output_dir, exist_ok=True)
-
     for reg in args.regularizations:
         reg_dir = f"{args.output_dir}/reg={reg}"
         phase1_ok = True
@@ -1363,6 +1683,8 @@ def main():
                 is_int_state, args.sampling_probability,
                 args.debiasing_l1, args.reachability_threshold, device, args.backend,
                 phase2_penalty=args.phase2_penalty,
+                num_restarts=args.phase2_num_restarts,
+                seed=args.phase2_seed,
             )
 
     # --- Model selection ---

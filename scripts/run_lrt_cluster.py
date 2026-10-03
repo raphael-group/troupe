@@ -10,11 +10,11 @@ Three-step workflow:
     Computes the observed LRT statistic, simulates all B bootstrap datasets,
     saves them to disk, and writes a ready-to-submit SLURM job-array script.
 
-    python scripts/run_lrt_cluster.py prepare \\
-        -i experiments/TLSC/processed_data/trees.pkl \\
-        --model results/TLSC/sample_0.05/best_model_dict.pkl \\
-        --constraint "B[NMPs,NeuralTube] >= 5.5 * B[NMPs,Somite]" \\
-        --sampling_prob 0.05 --B 199 \\
+    python scripts/run_lrt_cluster.py prepare \
+        -i experiments/TLSC/processed_data/trees.pkl \
+        --model results/TLSC/sample_0.05/best_model_dict.pkl \
+        --constraint "B[NMPs,NeuralTube] >= 5.5 * B[NMPs,Somite]" \
+        --sampling_prob 0.05 --B 199 \
         --output experiments/TLSC/lrt/nmp_neuraltube_somite
 
   Step 2 — submit (one command):
@@ -22,7 +22,7 @@ Three-step workflow:
     (or pass --submit to prepare to do this automatically)
 
   Step 3 — aggregate (run locally after jobs finish, seconds):
-    python scripts/run_lrt_cluster.py aggregate \\
+    python scripts/run_lrt_cluster.py aggregate \
         --output experiments/TLSC/lrt/nmp_neuraltube_somite
 
 Output directory layout:
