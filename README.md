@@ -23,11 +23,11 @@ Plotting differentiation maps also requires the [Graphviz](https://graphviz.org/
 
 # Example: running TROUPE on the TLS data
 
-The `example/TLS/` folder contains everything needed to reproduce the TROUPE analysis of the trunk-like structure (TLS) lineage trees from the paper:
+The `example/TLS/` folder contains everything needed to reproduce the TROUPE analysis of the trunk-like structure (TLSC) lineage trees from the paper:
 
 | File | Description |
 |------|-------------|
-| `example/TLS/data/trees.pkl` | 12 TLS lineage trees, with the Endothelial cells removed (pickled list of ete3 trees; each leaf has a `.state` cell-type label) |
+| `example/TLS/data/trees.pkl` | TLSC lineage trees (pickled list of ete3 trees; each leaf has a `.state` cell-type label) |
 | `example/TLS/data/terminal_labels.txt` | The terminal (fully differentiated) cell types: NeuralTube, Somite, Endoderm, PCGLC |
 | `example/TLS/data/observed_potencies.txt` | Potency of each observed cell type (e.g. the observed NMPs can produce NeuralTube and Somite) |
 | `example/TLS/run_example.sh` | Runs TROUPE (`scripts/run_classe_troupe.py`) over several regularization strengths and plots the results |
@@ -45,7 +45,6 @@ For each regularization strength, TROUPE
 2. extracts the progenitor states that remain in the sparse model and re-fits the reduced model without the strong penalty (Phase 2).
 
 TROUPE then picks the regularization strength at the knee of the negative log-likelihood vs. number-of-states curve (model selection).
-The full run takes about 70 minutes on a laptop CPU (Apple M1 Pro), or about 12 minutes per regularization strength.
 To try a subset of regularization strengths, pass them as arguments, e.g. `bash example/TLS/run_example.sh 10 3 1 0.3`.
 
 ## Output
