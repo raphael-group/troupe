@@ -1765,7 +1765,7 @@ def plot_differentiation_maps(results_dir, thresh, use_select_potencies, color_s
             -i /Users/william_hs/Desktop/Projects/troupe/results/TLSC_new/sample_0.05
 
         python scripts/evaluate_results.py plot-differentiation-maps \
-            -i $PWD/results/cardiac/sample_0.5
+            -i $PWD/results/mela/sample_0.5_E8.0_phylogmm_lineage_R1
     """
     reg_dirs = sorted(
         [d for d in os.listdir(results_dir)

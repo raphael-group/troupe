@@ -160,7 +160,7 @@ def main():
         print("\t child counts: ", child_counts)
         print("\t root len:     ", tree.dist)
 
-    # TODO: Should we also be scaling the branch lengths -> x120 to make them in hours
+    # TODO: Should we also be scaling the branch lengths -> x120 to make them in hours... No
     print("Total leaves: ", total_leaves)
     print("Num trees:    ", len(tree_list))
 

@@ -369,6 +369,7 @@ def _compute_classe_mle(
     num_iter=100,
     log_iter=1,
     max_hidden_growth_rate=50.0,
+    max_growth_rate=None,
 ):
     """Fit a ClaSSELikelihoodModel via LBFGS and save results.
 
@@ -385,6 +386,11 @@ def _compute_classe_mle(
         do_logging: Whether to log progress every log_iter steps.
         num_iter: Maximum number of LBFGS outer iterations.
         log_iter: Logging interval (iterations).
+        max_hidden_growth_rate: Upper bound on hidden-state growth rates, or
+            None for no bound.
+        max_growth_rate: Upper bound on *every* state's growth rate, or None
+            for no bound. Applied in addition to max_hidden_growth_rate, so
+            hidden states are held to the tighter of the two.
 
     Returns:
         (llh, final_loss) tuple.
@@ -442,6 +448,28 @@ def _compute_classe_mle(
     max_hidden_growth_param = _safe_softplus_inverse(
         torch.tensor(max_hidden_growth_rate, dtype=dtype)
     ).item() if hidden_idxs and max_hidden_growth_rate is not None else None
+    max_growth_param = _safe_softplus_inverse(
+        torch.tensor(max_growth_rate, dtype=dtype)
+    ).item() if max_growth_rate is not None else None
+
+    def _clamp_growth_rates():
+        """Projects growth params back inside their bounds, in place.
+
+        Growth rates are softplus(growth_params), so the bounds are applied in
+        parameter space. Called both before each objective evaluation and after
+        each LBFGS step, so that the checkpoint written when the loss improves
+        always satisfies the bound -- a step can otherwise leave the params
+        outside it between evaluations.
+        """
+        if max_growth_param is None and max_hidden_growth_param is None:
+            return
+        with torch.no_grad():
+            if max_growth_param is not None:
+                llh.growth_params.clamp_(max=max_growth_param)
+            if max_hidden_growth_param is not None:
+                llh.growth_params[hidden_idxs] = llh.growth_params[hidden_idxs].clamp(
+                    max=max_hidden_growth_param
+                )
 
     changeable_params = [p for p in llh.parameters(recurse=True) if p.requires_grad]
     optimizer = optim.LBFGS(
@@ -470,11 +498,7 @@ def _compute_classe_mle(
 
     def closure():
         optimizer.zero_grad()
-        if max_hidden_growth_param is not None:
-            with torch.no_grad():
-                llh.growth_params[hidden_idxs] = llh.growth_params[hidden_idxs].clamp(
-                    max=max_hidden_growth_param
-                )
+        _clamp_growth_rates()
         llh.precompute_ode()
         objective = _loss()
         if not torch.isfinite(objective):
@@ -490,6 +514,7 @@ def _compute_classe_mle(
         optimizer.step(closure)
         if closure_state["last_loss"] is None:
             raise RuntimeError("LBFGS step did not evaluate the objective")
+        _clamp_growth_rates()
         loss_value = closure_state["last_loss"]
 
         with torch.no_grad():
@@ -815,7 +840,8 @@ def build_model_info(states, terminal_labels, observed_potencies, potency_sets):
 # ---------------------------------------------------------------------------
 
 def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
-               reg, sampling_prob, output_dir, device, phase1_penalty="l1"):
+               reg, sampling_prob, output_dir, device, phase1_penalty="l1",
+               max_growth_rate=None):
     """Run Phase 1 (overparameterized) ClaSSE MLE for one regularization value.
 
     Args:
@@ -845,6 +871,7 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
             trees_copy, n_states, device, output_dir,
             model_info, sampling_prob, l1_reg=reg,
             regularization_type=phase1_penalty,
+            max_growth_rate=max_growth_rate,
         )
         return output_dir
     except Exception as e:
@@ -859,7 +886,7 @@ def run_phase1(trees, model_info, state2idx, num_obs, num_hidden,
 def _run_phase2_preset(phase1_dir, trees, terminal_labels, observed_potencies,
                        is_int_state, sampling_prob, debiasing_l1, device, backend,
                        phase2_penalty="l1", num_restarts=1, seed=0,
-                       preset_potencies=None):
+                       preset_potencies=None, max_growth_rate=None):
     """Phase 2 with a user-supplied potency structure (no Phase 1 needed).
 
     Builds the reduced state space directly from `preset_potencies` and
@@ -962,6 +989,7 @@ def _run_phase2_preset(phase1_dir, trees, terminal_labels, observed_potencies,
                     trees_copy, n_states_new, device, restart_dir,
                     model_info_r, sampling_prob, l1_reg=debiasing_l1,
                     regularization_type=phase2_penalty,
+                    max_growth_rate=max_growth_rate,
                 )
                 loss_file = os.path.join(restart_dir, "loss.txt")
                 with open(loss_file) as fp:
@@ -993,7 +1021,8 @@ def _run_phase2_preset(phase1_dir, trees, terminal_labels, observed_potencies,
 
 def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
                is_int_state, sampling_prob, debiasing_l1, threshold, device, backend,
-               phase2_penalty="l1", num_restarts=1, seed=0, preset_potencies=None):
+               phase2_penalty="l1", num_restarts=1, seed=0, preset_potencies=None,
+               max_growth_rate=None):
     """Extract potencies from Phase 1 model and run debiased Phase 2 ClaSSE MLE.
 
     Loads the Phase 1 model, finds reachable states from B, computes potencies
@@ -1015,6 +1044,7 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
             warm-start; subsequent restarts use random potency-constrained
             initializations. The best (lowest neg-llh) result is kept.
         seed: Master random seed for restart initializations.
+        max_growth_rate: Upper bound on every state's growth rate, or None.
         preset_potencies: If provided, a dict mapping state names (including
             hidden states) to potency tuples that defines the Phase 2 state
             space directly, bypassing potency inference from Phase 1's B matrix.
@@ -1030,7 +1060,7 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
             phase1_dir, trees, terminal_labels, observed_potencies,
             is_int_state, sampling_prob, debiasing_l1, device, backend,
             phase2_penalty=phase2_penalty, num_restarts=num_restarts, seed=seed,
-            preset_potencies=preset_potencies,
+            preset_potencies=preset_potencies, max_growth_rate=max_growth_rate,
         )
 
     model_dict_path = f"{phase1_dir}/model_dict.pkl"
@@ -1239,6 +1269,7 @@ def run_phase2(phase1_dir, trees, terminal_labels, observed_potencies,
                     trees_copy, n_states_new, device, restart_dir,
                     model_info_r, sampling_prob, l1_reg=debiasing_l1,
                     regularization_type=phase2_penalty,
+                    max_growth_rate=max_growth_rate,
                 )
                 loss_file = os.path.join(restart_dir, "loss.txt")
                 with open(loss_file) as fp:
@@ -1497,6 +1528,12 @@ def main():
         help="Master random seed for Phase 2 restart initializations. Default: 0.",
     )
     parser.add_argument(
+        "--max_growth_rate", type=float, default=None,
+        help="Upper bound on every state's growth rate (divisions per unit "
+             "branch-length time). Growth rates are clipped to this value "
+             "during optimization. Default: None (unbounded).",
+    )
+    parser.add_argument(
         "--reachability_threshold", type=float, default=0.001,
         help="Threshold for get_reachable_idxs",
     )
@@ -1613,6 +1650,7 @@ def main():
             num_restarts=args.phase2_num_restarts,
             seed=args.phase2_seed,
             preset_potencies=preset_potencies,
+            max_growth_rate=args.max_growth_rate,
         )
         if phase2_dir is None:
             raise RuntimeError("Phase 2 (preset) failed.")
@@ -1672,6 +1710,7 @@ def main():
                 trees, model_info, state2idx, num_obs, num_hidden,
                 reg, args.sampling_probability, reg_dir, device,
                 phase1_penalty=args.phase1_penalty,
+                max_growth_rate=args.max_growth_rate,
             )
 
         if (args.skip_phase_1 or phase1_ok) and reg > 0:
@@ -1685,6 +1724,7 @@ def main():
                 phase2_penalty=args.phase2_penalty,
                 num_restarts=args.phase2_num_restarts,
                 seed=args.phase2_seed,
+                max_growth_rate=args.max_growth_rate,
             )
 
     # --- Model selection ---

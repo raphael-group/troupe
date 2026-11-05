@@ -1,7 +1,7 @@
 # Tree-informed Rate Optimization Using Potency Enforcement (TROUPE)
 
 
-This reposiotry is a part of an in-review paper titled *Inferring Cell Differentiation Dynamics with Unobserved Progenitors* by William Howard-Snyder, Richard Zhang, Henri Schmidt, Michelle Chan, and Ben Raphael.
+This repository is a part of an in-review paper titled *Inferring Cell Differentiation Dynamics with Unobserved Progenitors* by William Howard-Snyder, Richard Zhang, Henri Schmidt, Michelle Chan, and Ben Raphael.
 It contains our implementation for Tree-informed Rate Optimization Using Potency Enforcement (TROUPE) as well as code to simulate data and run experiments.
 
 
@@ -16,162 +16,108 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+Plotting differentiation maps also requires the [Graphviz](https://graphviz.org/download/) system package (`brew install graphviz` on macOS, `sudo apt-get install graphviz` on Ubuntu/Debian, or `conda install graphviz`).
+
 > **GPU support:** the above installs the CPU build of PyTorch. For CUDA, follow the [PyTorch installation guide](https://pytorch.org/get-started/locally/) to install the appropriate build before running `pip install -r requirements.txt`.
 
 
-# Example method usage
+# Example: running TROUPE on the TLS data
 
-To run our method on one trial of the simulated data (with 32 trees and only 5 states observed out of 9 total states) run the following command:
-
-    bash scripts/troupe_inference_example.sh
-
-This produces a file at `troupe/example/results/reg=0/select_potencies/model_dict.pkl` for each regularization value among 0, 0.001, 0.003, 0.01, 0.03, ..., 10, 30.
-Each of these files stores the inferred transition and growth rates at the given regularization value.
-The script also generates a summary of the inferred results at `troupe/example/results/troupe_summary.txt`, which should look something like
-
-    best_reg	0.1
-    best_model_dir	path/to/inferred/params
-    knee_num_states	9
-    knee_loss	1240.465220608524
-    num_regularizations_tested	10
-
-Note that TROUPE correcly infers that the total number of states in the process is 9.
-
-To plot the differentiation maps for each regularization value run
-
-    BASE_DIR=path/to/troupe;
-    python scripts/evaluate_results.py plot-differentiation-maps \
-        -i $BASE_DIR/example/results
-
-you can view the differentiation map at `troupe/example/results/reg=0.1/select_potencies/figures/inferred_graph.pdf`.
-You can compare these results to the ground truth parameters (see `troupe/example/data/ground_truth_diff_map.png`) and notice that they are close to the inferred rates.
-
-
-# Likelihood Ratio Testing
-
-TROUPE includes a parametric bootstrap likelihood ratio test (LRT) for evaluating whether specific edges in the inferred differentiation map are statistically significant. The test compares an unconstrained model against a null model that enforces a user-specified constraint on the birth kernel, then calibrates the rejection threshold via simulation from the null -- avoiding the standard chi-squared approximation, which is invalid when the MLE lies on a parameter boundary.
-
-## Example: NMPs preferentially produce NeuralTube over Somite (TLSC data)
-
-This test asks whether the NMP to NeuralTube birth probability is at least 2.5x larger than NMP to Somite.
-
-**Prerequisites:** fit the TLSC ClaSSE-TROUPE model first (from the repo root):
-
-```bash
-bash scripts/TLS_experiment_classe/run_troupe_on_tls.bash TLSC
-```
-
-This writes the best model to `results/TLSC_group_lasso/sample_0.05/best_model_dict.pkl`. Then run the LRT:
-
-```bash
-python scripts/run_lrt.py \
-    -i experiments/TLSC/processed_data/trees.pkl \
-    --model results/TLSC_group_lasso/sample_0.05/best_model_dict.pkl \
-    --constraint "B[NMPs,NeuralTube] >= 5.5 * B[NMPs,Somite]" \
-    --sampling_prob 0.05 \
-    --B 99 \
-    --output experiments/TLSC_group_lasso/lrt/nmp_neuraltube_somite
-```
-
-Results are written to `experiments/TLSC_group_lasso/lrt/nmp_neuraltube_somite/`:
+The `example/TLS/` folder contains everything needed to reproduce the TROUPE analysis of the trunk-like structure (TLS) lineage trees from the paper:
 
 | File | Description |
 |------|-------------|
-| `lrt_results.json` | Observed Gamma, bootstrap statistics, p-value, decision |
-| `bootstrap_distribution.pdf` | Histogram of bootstrap Gamma values with observed Gamma marked |
-| `observed/` | Unconstrained and null model fits on the real data |
+| `example/TLS/data/trees.pkl` | 12 TLS lineage trees (pickled list of ete3 trees; each leaf has a `.state` cell-type label) |
+| `example/TLS/data/terminal_labels.txt` | The terminal (fully differentiated) cell types: NeuralTube, Somite, Endoderm, Endothelial, PCGLC |
+| `example/TLS/data/observed_potencies.txt` | Potency of each observed cell type (e.g. the observed NMPs can produce NeuralTube and Somite) |
+| `example/TLS/run_example.sh` | Runs TROUPE (`scripts/run_classe_troupe.py`) over several regularization strengths and plots the results |
 
-The console will print a summary:
-
-```
-============================================================
-  LIKELIHOOD RATIO TEST RESULT
-============================================================
-  H0: B[NMPs,NeuralTube] >= 2.5 * B[NMPs,Somite]
-
-  Observed LRT statistic:  <value>
-  Log-lik unconstrained:   <value>
-  Log-lik null:            <value>
-
-  Bootstrap replicates:    99
-  p-value:                 <value>
-  Critical value (alpha=0.05): <value>
-  Decision:                REJECT H0 / FAIL TO REJECT H0
-============================================================
-```
-
-**Interpreting the result:** rejecting H0 means the data are inconsistent with the null constraint — i.e., the observed asymmetry between NeuralTube and Somite production exceeds what would be expected by chance under a model where B[NMPs,NeuralTube] >= 2.5 x B[NMPs,Somite].
-
-## Running on a cluster (SLURM)
-
-With B=99 replicates, each requiring two full model fits, the sequential version can take hours. `run_lrt_cluster.py` distributes the bootstrap inference jobs as a SLURM job array so all B replicates run in parallel.
-
-**Step 1 — prepare** (run locally, ~minutes): computes the observed LRT statistic, simulates all B bootstrap datasets, and writes a ready-to-submit SLURM job-array script.
+After installing TROUPE, activate the virtual environment and run the example from the repository root:
 
 ```bash
-python scripts/run_lrt_cluster.py prepare \
-    -i experiments/TLSC/processed_data/trees.pkl \
-    --model results/TLSC/sample_0.05/best_model_dict.pkl \
-    --constraint "B[NMPs,NeuralTube] >= 2.5 * B[NMPs,Somite]" \
-    --sampling_prob 0.05 \
-    --B 99 \
-    --output experiments/TLSC/lrt/nmp_neuraltube_somite \
-    --slurm_time 2:00:00 \
-    --slurm_mem 8G
+source .venv/bin/activate
+bash example/TLS/run_example.sh
 ```
 
-**Step 2 — submit:**
+This runs TROUPE at the regularization strengths 10, 3, 1, 0.3, 0.1, 0.03, with a leaf sampling probability of 0.05.
+For each regularization strength, TROUPE
+1. fits an overparameterized model with every candidate progenitor state, using an L1 penalty to make the differentiation map sparse (Phase 1);
+2. extracts the progenitor states that remain in the sparse model and re-fits the reduced model without the strong penalty (Phase 2).
+
+TROUPE then picks the regularization strength at the knee of the negative log-likelihood vs. number-of-states curve (model selection).
+The full run takes about RUNTIME on a laptop CPU.
+To try a subset of regularization strengths, pass them as arguments, e.g. `bash example/TLS/run_example.sh 10 1`.
+
+## Output
+
+Results are written to `example/TLS/results/`:
+
+| Path | Description |
+|------|-------------|
+| `classe_troupe_summary.txt` | Selected regularization strength, number of states, and negative log-likelihood for every regularization strength |
+| `best_model_dict.pkl` | Parameters of the selected model |
+| `pareto_front.pdf` | Negative log-likelihood vs. number of states, with the selected model marked |
+| `reg=<value>/` | Phase 1 model for that regularization strength |
+| `reg=<value>/select_potencies/model_dict.pkl` | Phase 2 (re-fit) model for that regularization strength |
+| `reg=<value>/select_potencies/figures/differentiation_map.pdf` | Inferred differentiation map |
+| `reg=<value>/select_potencies/figures/growth_rate_bars.pdf` | Inferred per-state growth rates |
+
+Each `model_dict.pkl` is a pickled dict with the following entries:
+
+| Key | Description |
+|-----|-------------|
+| `daughter_kernel` | Row-stochastic birth kernel B: `B[i, j]` is the probability that a division of a type-i cell produces a type-j daughter |
+| `growth_rates` | Division rate of each state |
+| `root_distribution` | Distribution of the root cell's state |
+| `idx2state` | State index to state name; inferred progenitor states are given new names |
+| `idx2potency` | State index to the set of terminal types the state can produce |
+
+`classe_troupe_summary.txt` should look like this (exact values may vary slightly across platforms and PyTorch versions):
+
+```
+SUMMARY
+```
+
+To load the selected model in Python:
+
+```python
+import pickle
+with open("example/TLS/results/best_model_dict.pkl", "rb") as f:
+    model = pickle.load(f)
+print(model["idx2state"])
+print(model["idx2potency"])
+print(model["daughter_kernel"])
+```
+
+## Running on your own data
+
+`scripts/run_classe_troupe.py` takes the same inputs for any dataset.
+Your trees must be ultrametric, with each leaf's cell type stored in its `.state` attribute.
+Pass them as a pickled list of ete3 trees or as a Newick file with one tree per line.
+Run `python scripts/run_classe_troupe.py --help` for all options.
+For example:
 
 ```bash
-sbatch experiments/TLSC/lrt/nmp_neuraltube_somite/slurm_submit.sh
+python scripts/run_classe_troupe.py \
+    -i path/to/trees.pkl \
+    -o path/to/results \
+    --terminal_labels path/to/terminal_labels.txt \
+    --observed_potencies path/to/observed_potencies.txt \
+    --sampling_probability 0.05 \
+    --regularizations 10 3 1 0.3 0.1 0.03
 ```
 
-Pass `--submit` to the prepare step to combine steps 1 and 2. Each array task runs `lrt_worker.py` for one replicate and writes its result to `work/bootstrap_results/XXXX.json`.
-
-**Step 3 — aggregate** (run locally after all jobs finish, seconds):
+`--terminal_labels` and `--observed_potencies` are optional.
+If you omit them, every observed cell type is treated as terminal.
+`terminal_labels.txt` lists one terminal cell type per line.
+`observed_potencies.txt` has one line per observed cell type: the type name, a tab, then a comma-separated list of the terminal types it can produce.
+To plot differentiation maps for every regularization strength, run
 
 ```bash
-python scripts/run_lrt_cluster.py aggregate \
-    --output experiments/TLSC/lrt/nmp_neuraltube_somite
+python scripts/evaluate_results.py plot-differentiation-maps -i path/to/results
 ```
 
-This reads all per-replicate results, computes the empirical p-value, prints the same summary table as the sequential script, and writes `lrt_results.json` and `bootstrap_distribution.pdf`. If some jobs failed, a warning is printed and the p-value is computed from the completed replicates.
+# Simulation experiments
 
-SLURM options (all have sensible defaults):
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--slurm_time` | `2:00:00` | Wall-clock limit per job |
-| `--slurm_mem` | `8G` | Memory per job |
-| `--slurm_cpus` | `1` | CPUs per task |
-| `--slurm_partition` | *(none)* | SLURM partition |
-| `--venv` | `<repo_root>/.venv` | Path to virtual environment |
-
-
-## General constraint syntax
-
-Two constraint forms are supported via `--constraint`:
-
-```
-# Ratio: one kernel entry must be at least k times another
---constraint "B[StateA,StateB] >= k * B[StateC,StateD]"
-
-# Lower bound: one kernel entry must exceed a fixed value
---constraint "B[StateA,StateB] >= c"
-```
-
-Multiple `--constraint` flags can be combined to test joint hypotheses. State names must match those in the fitted model's `idx2state` mapping (visible in the terminal labels file for each experiment).
-
-
-# Experiments
-
-We also provide the code we used to run TROUPE and SSE for the exeriments (simulated and TLS data) from our paper.
-Note that these scripts are mainly for reference for how we conducted our experiments and are not intended to be maintained.
-
-## Simulated data experiments (Section 4.1)
-
-Scripts for running TROUPE and SSE are located in `troupe/scripts/TLS_experiment`.
-
-## TLS experiments (Section 4.2)
-
-Scripts for running TROUPE and SSE are located in `troupe/scripts/sample_efficiency_experiment`.
+Software for simulating data and benchmarking other methods (e.g., ICE-FASE and Carta) can be found [at this repo](https://github.com/raphael-group/troupe-experiments).
+Please navigate to that repository and follow the instructions there to replicate our results.

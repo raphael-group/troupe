@@ -51,9 +51,12 @@ def get_terminal_labels(terminal_label_path, is_int_state=False):
     return terminal_labels
 
 def get_observed_potencies(observed_potencies_path, is_int_state=False):
-    """Reads observed potency mappings from a tab-delimited file.
+    """Reads observed potency mappings from a whitespace-delimited file.
 
-    Each line should have the format: ``state<TAB>potency1,potency2,...``
+    Each non-empty, non-comment line must have the format:
+    ``state<whitespace>potency1,potency2,...``
+
+    Blank lines and lines starting with ``#`` are ignored.
 
     Args:
         observed_potencies_path: Path to the potency file, or None (which
@@ -66,11 +69,13 @@ def get_observed_potencies(observed_potencies_path, is_int_state=False):
     observed_potencies = {}
     if observed_potencies_path is not None:
         with open(observed_potencies_path, "r") as fp:
-            observed_potencies = {}
-            for line in fp.readlines():
-                if len(line) == 0:
+            for line in fp:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
                     continue
-                entries = line.strip().split("\t")
+                entries = stripped.split(None, 1)  # split on any whitespace, max 2 fields
+                if len(entries) < 2:
+                    continue
                 state = _parse_state(entries[0], is_int_state)
                 potency = entries[1].split(",")
                 if is_int_state:

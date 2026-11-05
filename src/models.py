@@ -518,7 +518,7 @@ class PureBirthLikelihoodModel(CTMCLikelihoodModel):
                     root_idx = idx
             self.root_idx = root_idx
             # Terminal states: those whose potency set contains only themselves
-            self.terminal_idx = [idx for idx, potency in idx2potency.items() if potency == (idx,)]
+            self.terminal_idx = [idx for idx, potency in idx2potency.items() if len(potency) == 1]
 
         self.num_hidden = num_hidden
         self.growth_params.requires_grad = optimize_growth
