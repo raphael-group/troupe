@@ -27,8 +27,8 @@ The `example/TLS/` folder contains everything needed to reproduce the TROUPE ana
 
 | File | Description |
 |------|-------------|
-| `example/TLS/data/trees.pkl` | 12 TLS lineage trees (pickled list of ete3 trees; each leaf has a `.state` cell-type label) |
-| `example/TLS/data/terminal_labels.txt` | The terminal (fully differentiated) cell types: NeuralTube, Somite, Endoderm, Endothelial, PCGLC |
+| `example/TLS/data/trees.pkl` | 12 TLS lineage trees, with the Endothelial cells removed (pickled list of ete3 trees; each leaf has a `.state` cell-type label) |
+| `example/TLS/data/terminal_labels.txt` | The terminal (fully differentiated) cell types: NeuralTube, Somite, Endoderm, PCGLC |
 | `example/TLS/data/observed_potencies.txt` | Potency of each observed cell type (e.g. the observed NMPs can produce NeuralTube and Somite) |
 | `example/TLS/run_example.sh` | Runs TROUPE (`scripts/run_classe_troupe.py`) over several regularization strengths and plots the results |
 
@@ -39,14 +39,14 @@ source .venv/bin/activate
 bash example/TLS/run_example.sh
 ```
 
-This runs TROUPE at the regularization strengths 10, 3, 1, 0.3, 0.1, 0.03, with a leaf sampling probability of 0.05.
+This runs TROUPE at the regularization strengths 10, 1, and 0.1, with a leaf sampling probability of 0.05.
 For each regularization strength, TROUPE
 1. fits an overparameterized model with every candidate progenitor state, using an L1 penalty to make the differentiation map sparse (Phase 1);
 2. extracts the progenitor states that remain in the sparse model and re-fits the reduced model without the strong penalty (Phase 2).
 
 TROUPE then picks the regularization strength at the knee of the negative log-likelihood vs. number-of-states curve (model selection).
-The full run takes about RUNTIME on a laptop CPU.
-To try a subset of regularization strengths, pass them as arguments, e.g. `bash example/TLS/run_example.sh 10 1`.
+The full run takes about 70 minutes on a laptop CPU (Apple M1 Pro), or about 12 minutes per regularization strength.
+To try a subset of regularization strengths, pass them as arguments, e.g. `bash example/TLS/run_example.sh 10 3 1 0.3`.
 
 ## Output
 
@@ -75,7 +75,21 @@ Each `model_dict.pkl` is a pickled dict with the following entries:
 `classe_troupe_summary.txt` should look like this (exact values may vary slightly across platforms and PyTorch versions):
 
 ```
-SUMMARY
+best_reg	3.0
+best_model_dir	/path/to/troupe/example/TLS/results/reg=3.0/select_potencies
+knee_num_states	10
+knee_loss	901.6692406255844
+sampling_probability	0.05
+num_regularizations_tested	6
+
+All results:
+reg	num_states	neg_llh
+10.0	7	1282.4999852950345
+3.0	10	901.6692406255844
+1.0	12	923.9256324947544
+0.3	19	1005.8348146577059
+0.1	20	1007.2728760573672
+0.03	15	1086.2475528889943
 ```
 
 To load the selected model in Python:
@@ -104,7 +118,7 @@ python scripts/run_classe_troupe.py \
     --terminal_labels path/to/terminal_labels.txt \
     --observed_potencies path/to/observed_potencies.txt \
     --sampling_probability 0.05 \
-    --regularizations 10 3 1 0.3 0.1 0.03
+    --regularizations 10 1 0.1
 ```
 
 `--terminal_labels` and `--observed_potencies` are optional.

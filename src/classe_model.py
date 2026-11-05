@@ -198,7 +198,7 @@ class ClaSSELikelihoodModel(BaseLikelihoodModel):
                 if len(potency) > len(idx2potency[root_idx]):
                     root_idx = idx
             self.root_idx = root_idx
-            self.terminal_idx = [idx for idx, potency in idx2potency.items() if potency == (idx,)]
+            self.terminal_idx = [idx for idx, potency in idx2potency.items() if len(potency) == 1]
 
         self._tree_tensors = [self.tree_tens.get_tree_tensors(i) for i in range(len(self.tree_tens.trees))]
         self._prepare_time_metadata()
